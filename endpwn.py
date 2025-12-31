@@ -21,7 +21,6 @@ import hashlib
 init(autoreset=True)
 
 # =========================
-# CONFIGURACIÓN GLOBAL
 # =========================
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) Chrome/120 Safari/537.36"
 TIMEOUT = 10
@@ -101,23 +100,74 @@ CLASS_PRIORITY = {
     "other": 0,
 }
 MAX_JS_DEPTH = 10
-EXPLOIT_VALUES = ["admin", "debug", "internal", "1", "0", "-1", "test", "user", "true", "false", "null", "root", "guest"]  # Expanded with more reasonable variants
+EXPLOIT_VALUES = [
+    "admin", "administrator", "root", "superuser", "sysadmin",
+    "user", "guest", "anonymous", "public",
+
+    "true", "false", "1", "0", "-1", "yes", "no", "on", "off",
+
+    "debug", "test", "testing", "dev", "development", "staging", "internal",
+
+    "null", "none", "nil", "undefined", "NaN", "", " ",
+
+    "all", "*", "self", "me", "current",
+    "000", "001", "999", "1000", "2147483647",
+
+    "token", "session", "sid", "jwt", "oauth", "apikey"
+]
+
 CONTEXT_VALUES = {
-    "admin": ["root", "superuser", "sysadmin"],
-    "user": ["me", "self", "current", "guest", "anonymous"],
-    "debug": ["enabled", "disabled", "on", "off"],
-    "auth": ["token", "session", "oauth"],
-    "api": ["v1", "v2", "beta"],
-    "payment": ["checkout", "invoice", "order"],
+    "admin": [
+        "true", "1", "yes", "root", "superuser", "enabled", "-1"
+    ],
+    "user": [
+        "self", "me", "current", "guest", "anonymous", "public"
+    ],
+    "debug": [
+        "true", "1", "on", "enabled", "verbose", "trace"
+    ],
+    "auth": [
+        "token", "session", "sid", "jwt", "oauth", "apikey", "bearer"
+    ],
+    "api": [
+        "v1", "v2", "v3", "beta", "alpha", "latest", "internal"
+    ],
+    "id": [
+        "0", "1", "-1", "999", "1000", "all", "*", "11111111-1111-1111-1111-111111111111", "00000000-0000-0000-0000-000000000000", "556ee400-e21b-413d-a776-446655440001"
+    ],
+    "payment": [
+        "checkout", "invoice", "order", "refund", "test", "sandbox"
+    ],
+    "env": [
+        "dev", "test", "staging", "prod", "production"
+    ],
     "other": []
 }
-MAX_JSON_DEPTH = 5
-SEMANTIC_DEPTH_LIMIT = 5  # Limit crawling by semantic depth (e.g., path segments)
-BACKUP_EXTS = [".bak", ".old", "~", ".swp", ".txt", ".log", ".config", ".ini", ".yaml", ".yml", ".toml", ".env", ".backup"]
-VARIANT_FILE_EXTS = (".js", ".json", ".php", ".xml", ".txt", ".config")
+
+MAX_JSON_DEPTH = 7
+
+SEMANTIC_DEPTH_LIMIT = 6
+
+BACKUP_EXTS = [
+    ".bak", ".backup", ".old", ".orig", ".tmp", ".temp",
+    "~", ".swp", ".swo",
+    ".txt", ".log", ".debug",
+    ".config", ".cfg", ".conf",
+    ".ini", ".yaml", ".yml", ".toml",
+    ".env", ".env.local", ".env.prod"
+]
+
+VARIANT_FILE_EXTS = (
+    ".js", ".map",
+    ".json",
+    ".php", ".phtml",
+    ".xml",
+    ".txt",
+    ".config", ".cfg", ".conf",
+    ".yaml", ".yml"
+)
 
 # =========================
-# ESTADO GLOBAL
 # =========================
 class State:
     def __init__(self, max_requests: int, directory_focused: bool, route_limit: int):
@@ -255,7 +305,7 @@ def log_progress(msg: str):
     print(f"{Fore.LIGHTBLUE_EX}[PROG] {msg}{Style.RESET_ALL}")
 
 # =========================
-# UTILIDADES
+# U
 # =========================
 def same_domain(url: str, base: str, allow_sub: bool) -> bool:
     try:
@@ -311,35 +361,78 @@ def metrics_similar(m1: Tuple, m2: Tuple) -> bool:
         fw1 == fw2
     )
 
-def is_fallback_response(original_url: str, r: httpx.Response, home_metrics: Tuple, home_hash: str, home_length: int, home_content_type: str) -> str:
-    signals = 0
+def is_fallback_response(
+    original_url: str,
+    r: httpx.Response,
+    home_metrics: Tuple,
+    home_hash: str,
+    home_length: int,
+    home_content_type: str
+) -> str:
+    signals = 0.0
     final_url = str(r.url)
-    if final_url != original_url and urlparse(final_url).path in ("/", "/login", "/login/"):
-        signals += 1
-    content_type = r.headers.get("content-type", "")
+
+    # --- Early exclusions ---
+    content_type = r.headers.get("content-type", "").lower()
+    if not content_type or any(x in content_type for x in ("application/json", "application/xml", "image/", "font/", "video/", "audio/")):
+        return "no"
+
     if "text/html" not in content_type:
-        return 'no'
-    this_metrics = get_dom_metrics(r.text)
-    if metrics_similar(this_metrics, home_metrics):
-        signals += 1
-    this_hash = hashlib.md5(r.content).hexdigest()
-    if this_hash == home_hash:
-        signals += 1
-    if abs(len(r.content) - home_length) < 500:
-        signals += 1
+        return "no"
+
+    # --- Redirect home/login ---
+    parsed_final = urlparse(final_url)
+    if final_url != original_url and parsed_final.path in ("/", "/login", "/login/"):
+        signals += 1.0
+
     body = r.text.lower()
-    if any(x in body for x in ["react-dom", "angular", "vue", "svelte", "next.js", "nuxt.js"]):
-        signals += 1
-    # Distinguish types
-    if 'cloudflare' in r.headers.get('server', '').lower() or 'akamai' in r.headers.get('server', '').lower():
-        signals -= 1  # Possible CDN generic
-    if 'login' in body or 'signin' in body:
-        signals -= 0.5  # Possible login reuse
+
+    # --- DOM similarity ---
+    try:
+        this_metrics = get_dom_metrics(r.text)
+        if metrics_similar(this_metrics, home_metrics):
+            signals += 1.0
+    except Exception:
+        pass
+
+    # --- Hash ---
+    try:
+        this_hash = hashlib.md5(r.content).hexdigest()
+        if this_hash == home_hash:
+            signals += 1.5
+    except Exception:
+        pass
+
+    # --- ) ---
+    length_diff = abs(len(r.content) - home_length)
+    if length_diff < max(500, home_length * 0.05):
+        signals += 1.0
+
+    # --- SPA / fallback ---
+    spa_markers = (
+        "react-dom", "angular", "vue", "svelte",
+        "next.js", "nuxt.js",
+        "id=\"root\"", "id=\"app\"",
+        "__next_data__", "window.__nuxt__"
+    )
+    if any(x in body for x in spa_markers):
+        signals += 1.0
+
+    # --- Heurístics fallback ---
+    server_hdr = r.headers.get("server", "").lower()
+    if any(x in server_hdr for x in ("cloudflare", "akamai", "fastly")):
+        signals -= 0.5  # CDN puede servir fallback genérico
+
+    if any(x in body for x in ("login", "signin", "sign in")):
+        signals -= 0.5  # Login reutilizado no siempre es SPA fallback
+
+    # ---  ---
     if signals >= 3:
-        return 'confirmed'
+        return "confirmed"
     elif signals >= 1.5:
-        return 'uncertain'
-    return 'no'
+        return "uncertain"
+    return "no"
+
 
 def infer_parent_routes(url: str) -> List[str]:
     parsed = urlparse(url)
@@ -513,7 +606,8 @@ async def analyze_endpoints(state: State):
         parents = infer_parent_routes(url)
         for parent in parents:
             await state.add_endpoint(parent, "inferred-parent", mark_doubtful=True)
-            state.endpoints[parent]["inferred"] = True
+            if parent in state.endpoints:
+                state.endpoints[parent]["inferred"] = True
 
     # Handle dynamics
     for dyn_url in list(set(state.dynamic_urls)):
@@ -525,7 +619,11 @@ async def analyze_endpoints(state: State):
         clean_path = re.sub(r'//+', '/', clean_path)
         clean_url = parsed._replace(path=clean_path, query='', fragment='').geturl()
         await state.add_endpoint(clean_url, source + "-clean", mark_doubtful=True)
-        state.endpoints[clean_url]["fallback_candidate"] = True  # Mark as potential fallback
+
+        if clean_url in state.endpoints:
+            state.endpoints[clean_url]["fallback_candidate"] = True
+            state.endpoints[clean_url]["inferred"] = True
+
 
         # Generate variants
         cls = state.endpoints[dyn_url]["class"]
@@ -536,7 +634,9 @@ async def analyze_endpoints(state: State):
             var_url = parsed._replace(path=var_path, query='', fragment='').geturl()
             if var_url != dyn_url:
                 await state.add_endpoint(var_url, source + "-variant", mark_doubtful=True)
-                state.endpoints[var_url]["inferred"] = True
+                if var_url in state.endpoints:
+                    state.endpoints[var_url]["inferred"] = True
+
 
     # Generate backup variants for file-like endpoints
     for url in list(state.endpoints.keys()):
@@ -545,7 +645,8 @@ async def analyze_endpoints(state: State):
             for ext in BACKUP_EXTS:
                 var_url = url + ext
                 await state.add_endpoint(var_url, source + "-backup", mark_doubtful=True)
-                state.endpoints[var_url]["inferred"] = True
+                if var_url in state.endpoints:
+                    state.endpoints[var_url]["inferred"] = True
 
 # =========================
 # VALIDATION PHASE
@@ -836,7 +937,7 @@ if __name__ == "__main__":
     parser.add_argument("target", help="Target URL or domain")
     parser.add_argument("--sub-domain", action="store_true", help="Allow subdomains")
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("--wayback", action="store_true", help="Enumeration only, no validation")
+    parser.add_argument("--enum-only",action="store_true",help="Run discovery and analysis only, skip validation phase")
     parser.add_argument("--directory-focused", action="store_true", help="Focus on directory routes")
     parser.add_argument("--no-historical",action="store_true",help="Disable historical route discovery (Wayback Machine)")
     parser.add_argument("--max-requests", type=int, default=500000, help="Max HTTP requests")
