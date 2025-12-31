@@ -1,95 +1,92 @@
 
+# endpwn
 
-# endpwn — Bug Bounty Recon (JS Mapper)
----
+**endpwn** is an advanced engine for discovering web endpoints and routes, designed for bug bounty and security research.  
+Its goal is not just to “find URLs,” but to enumerate real, historical, and semantic routes while minimizing noise and avoiding the false positives typical of traditional crawlers.
 
-# Advanced Recursive Endpoint Discovery Engine
-
-An advanced Python-based engine for **recursive HTTP endpoint discovery, validation, and classification**, designed for **offensive reconnaissance and access-control analysis**.
-
-The tool focuses on **accurate surface mapping** rather than raw crawling volume, with strong internal logic to reduce false positives commonly produced by modern SPAs and authentication flows.
+The design prioritizes coverage without losing endpoints, clearly decoupling the phases of discovery, analysis, and validation.
 
 ---
 
-## Features
+## Installation
 
-* Recursive endpoint discovery from:
-
-  * HTML responses
-  * JavaScript files
-  * Dynamically inferred paths
-* Intelligent endpoint validation:
-
-  * HEAD-first probing
-  * Conditional GET requests
-* Robust **SPA fallback and silent redirect detection**
-* Automatic filtering of:
-
-  * Home page redirects
-  * Login redirects
-  * Client-side SPA fallbacks
-* Endpoint classification by HTTP status
-* Controlled **403 bypass testing** using semantic path variants
-* One-time bypass execution per endpoint (no repeated noise)
-* Canonical path deduplication
-* Async execution with concurrency limits
-* Internal state tracking for endpoints and bypass attempts
-* Clean, structured output suitable for manual analysis or reporting
+```bash
+git clone https://github.com/tuusuario/endpwn.git
+cd endpwn
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
 ---
 
-## Internal Workflow
+## Basic Usage
 
-1. Home page fingerprinting (hash, content length, content type)
-2. Initial endpoint discovery
-3. Endpoint validation and status classification
-4. SPA fallback detection and filtering
-5. Dynamic endpoint generation (only for valid responses)
-6. Controlled 403 bypass attempts
-7. Final result aggregation and deduplication
+**Full scan (discovery + analysis + validation):**
+```bash
+python3 endpwnV3.py https://example.com
+```
 
----
+**Enumeration without validation (only routes and endpoints):**
+```bash
+python3 endpwnV3.py https://example.com --enum-only
+```
 
-## SPA Fallback Detection
+**Disable historical discovery (Wayback):**
+```bash
+python3 endpwnV3.py https://example.com --no-historical
+```
 
-The engine detects scenarios where an endpoint returns `200 OK` but serves:
-
-* The application home page
-* A login page
-* A client-side SPA fallback route
-
-Such responses are excluded from:
-
-* Dynamic path generation
-* Debug or test endpoint probing
-* Bypass result reporting
-
-This significantly reduces false positives on modern web applications.
+**Directory-focused mode:**
+```bash
+python3 endpwnV3.py https://example.com --directory-focused
+```
 
 ---
 
-## 403 Handling and Bypass Logic
+## Historical Discovery (Wayback Machine)
 
-* All `403 Forbidden` endpoints are reported with their original URL.
-* Each endpoint is tested for bypass **only once**.
-* Bypass results are validated against the original response.
-* Responses matching home or fallback fingerprints are discarded.
-* Failed bypass attempts are explicitly marked.
+By default, **endpwn** includes historical routes obtained from Wayback Machine.
 
----
+This enables discovery of:
+- Old endpoints removed from the frontend  
+- Legacy routes (.jsp, .php, .old, .bak)  
+- Versioned APIs no longer documented  
+- Resources still accessible but not linked  
 
-## Requirements
-
-* Python 3.9+
-* Dependencies:
-
-  * `httpx`
-  * `asyncio`
-  * `hashlib`
-  * `re`
-  * `json`
+Historical routes are not immediately validated, preventing noise and unnecessary blocking.  
+Internally, Wayback routes are normalized and integrated into the same route graph as current routes.
 
 ---
 
-## Use
-python3 endpwn.py example.com
+## Advanced SPA Fallback Detection
+
+**endpwn** includes a heuristic system to detect when an endpoint returns a generic fallback instead of a real route.
+
+Examples of detected fallbacks:
+- SPAs always returning `index.html`  
+- Silent redirects to `/` or `/login`  
+- Generic pages served by CDNs  
+
+Detection is based on multiple combined signals:
+- Structural DOM similarity  
+- Content hash  
+- Relative response size  
+- SPA artifacts (`root`, `__next_data__`, etc.)  
+- Server headers (CDN-aware)  
+
+This reduces false positives without eliminating potentially interesting routes.
+
+---
+
+## What’s New (v3)
+
+Compared to previous versions, **endpwn v3** introduces:
+- Clear separation between discovery, analysis, and validation  
+- `--enum-only` mode without early validation  
+- Wayback Machine enabled by default  
+- Improved SPA fallback detection  
+- Route inference decoupled from JavaScript  
+- Crawling limited by semantic depth  
+- Significant noise reduction  
+- Greater coverage of forgotten or legacy routes
