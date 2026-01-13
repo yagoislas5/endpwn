@@ -24,22 +24,22 @@ pip install -r requirements.txt
 
 **Full scan (discovery + analysis + validation):**
 ```bash
-python3 endpwnV3.py https://example.com
+python3 endpwn.py https://example.com
 ```
 
 **Enumeration without validation (only routes and endpoints):**
 ```bash
-python3 endpwnV3.py https://example.com --enum-only
+python3 endpwn.py https://example.com --enum-only
 ```
 
 **Disable historical discovery (Wayback):**
 ```bash
-python3 endpwnV3.py https://example.com --no-historical
+python3 endpwn.py https://example.com --no-historical
 ```
 
 **Directory-focused mode:**
 ```bash
-python3 endpwnV3.py https://example.com --directory-focused
+python3 endpwn.py https://example.com --directory-focused
 ```
 
 ---
