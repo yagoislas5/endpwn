@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =========================
-# ENDPWN V1.0.3
+# ENDPWN V1.0.4
 # =========================
 import argparse
 import asyncio
@@ -167,6 +167,28 @@ VARIANT_FILE_EXTS = (
     ".yaml", ".yml"
 )
 
+SOFT_404_PATTERNS = [
+    r"page you are looking for does not exist",
+    r"page not found",
+    r"404",
+    r"not found",
+    r"doesn't exist",
+    r"does not exist",
+    r"no existe",
+    r"página no encontrada",
+    r"recurso no encontrado",
+    r"error 404",
+    r"nothing here",
+    r"oops.*not found",
+    r"not exist",
+    r"Back to home",
+]
+SOFT_404_REGEX = re.compile(
+    "|".join(SOFT_404_PATTERNS),
+    re.I
+)
+
+
 # =========================
 # =========================
 class State:
@@ -174,30 +196,43 @@ class State:
         self.max_requests = max_requests
         self.requests = 0
         self.stop = False
+
         self.seen_js: Set[str] = set()
         self.js_graph: Dict[str, Set[str]] = defaultdict(set)
-        self.endpoints: Dict[str, Dict[str, Any]] = {}  # All collected, with metadata
-        self.routes: Set[str] = set()  # Pure routes (directories)
+
+        self.endpoints: Dict[str, Dict[str, Any]] = {}
+        self.routes: Set[str] = set()
+
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+
         self.canon_to_original: Dict[str, str] = {}
         self.js_list: List[str] = []
         self.php_list: List[Dict] = []
         self.ep_list: List[Dict] = []
+
         self.base_netloc = ""
+        self.base_domain = ""
+
         self._processing_variants = set()
         self.successful_bypasses: List[str] = []
-        self.home_metrics: Dict[str, Any] = None
-        self.dynamic_urls: List[str] = []
         self.bypassed: Set[str] = set()
+
+        self.home_metrics = None
+        self.home_length = 0
+        self.home_hash = ""
+        self.home_content_type = ""
+
+        self.dynamic_urls: List[str] = []
+
         self.directory_focused = directory_focused
         self.route_limit = route_limit
-        self.base_domain = '.'.join(self.base_netloc.split('.')[-2:]) if len(self.base_netloc.split('.')) > 1 else self.base_netloc
+
+    def register_request(self):
+        self.requests += 1
 
     def can_request(self) -> bool:
         return self.requests < self.max_requests and not self.stop
 
-    def register_request(self, url: str):
-        self.requests += 1
 
     def classify(self, url: str) -> str:
         for k, rx in CLASSIFY_REGEX.items():
@@ -272,12 +307,12 @@ class State:
             "is_dynamic": is_dynamic,
             "is_route": is_route,
             "fallback": False,
-            "doubtful": mark_doubtful,  # Mark if uncertain
+            "doubtful": mark_doubtful,  
             "inferred": False,
             "historical": False,
-            "fallback_candidate": False,  # New flag for potential fallback
+            "fallback_candidate": False, 
             "host_mismatch": host_mismatch,
-            "fallback_status": None,  # None, 'confirmed', 'uncertain'
+            "fallback_status": None, 
         }
         if is_dynamic:
             self.dynamic_urls.append(url)
@@ -355,11 +390,36 @@ def metrics_similar(m1: Tuple, m2: Tuple) -> bool:
         abs(f1 - f2) <= 1 and
         abs(s1 - s2) <= 2 and
         abs(d1 - d2) <= 3 and
-        abs(l1 - l2) <= 5 and  # Added tolerance for links
+        abs(l1 - l2) <= 5 and
         b1 == b2 and
         r1 == r2 and
         fw1 == fw2
     )
+    
+def is_soft_404(r: httpx.Response) -> bool:
+    try:
+        content_type = r.headers.get("content-type", "").lower()
+        if "text/html" not in content_type:
+            return False
+
+        body = r.text.lower()
+
+        if SOFT_404_REGEX.search(body):
+            return True
+
+        m = re.search(r"<title>(.*?)</title>", body, re.I | re.S)
+        if m and SOFT_404_REGEX.search(m.group(1)):
+            return True
+
+        if r.headers.get("x-error") or r.headers.get("x-not-found"):
+            return True
+
+    except Exception:
+        pass
+
+    return False
+
+
 
 def is_fallback_response(
     original_url: str,
@@ -369,81 +429,164 @@ def is_fallback_response(
     home_length: int,
     home_content_type: str
 ) -> str:
-    signals = 0.0
-    final_url = str(r.url)
+    import hashlib
+    from urllib.parse import urlparse
+    
+    STATIC_EXTENSIONS = (
+        ".js", ".css", ".map",
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
+        ".woff", ".woff2", ".ttf", ".eot",
+        ".ico",
+        ".pdf",
+        ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z",
+        ".bak", ".backup", ".old", ".tmp", ".swp",
+        ".log",
+        ".env", ".ini", ".conf", ".config",
+        ".sql", ".db",
+    )
 
-    # --- Early exclusions ---
+    IMPOSSIBLE_PATH_MARKERS = (
+        "/node_modules/",
+        "/usr/",
+        "/etc/",
+        "/bin/",
+        "/sbin/",
+        "/lib/",
+        "/var/",
+        "/tmp/",
+        "/proc/",
+        "/sys/",
+    )
+
+    SPA_MARKERS = (
+        "react-dom",
+        "angular",
+        "vue",
+        "svelte",
+        "next.js",
+        "nuxt",
+        "id=\"root\"",
+        "id=\"app\"",
+        "__next_data__",
+        "window.__nuxt__",
+    )
+
+    NAVIGATION_MARKERS = (
+        "<nav",
+        "<header",
+        "<footer",
+        "<main",
+        "router",
+        "history.push",
+    )
+
+    def path_entropy(path: str) -> float:
+        if not path:
+            return 0.0
+        return len(set(path)) / max(len(path), 1)
+
     content_type = r.headers.get("content-type", "").lower()
-    if not content_type or any(x in content_type for x in ("application/json", "application/xml", "image/", "font/", "video/", "audio/")):
+    if not content_type:
+        return "no"
+
+    if any(x in content_type for x in (
+        "application/json",
+        "application/xml",
+        "image/",
+        "font/",
+        "video/",
+        "audio/",
+    )):
         return "no"
 
     if "text/html" not in content_type:
         return "no"
 
-    # --- Redirect home/login ---
+    if is_soft_404(r):
+        return "no"
+
+    parsed = urlparse(original_url)
+    path = parsed.path.lower()
+
+    if path.endswith(STATIC_EXTENSIONS):
+        return "no"
+
+    if any(x in path for x in IMPOSSIBLE_PATH_MARKERS):
+        return "no"
+
+    if len(path) > 60 and path_entropy(path) > 0.55:
+        return "no"
+
+    body = r.text.lower()
+    final_url = str(r.url)
+    signals = 0.0
+
+    if not any(x in body for x in NAVIGATION_MARKERS):
+        return "no"
+
+    signals += 1.0 
+
+    # Redirect a home/login
     parsed_final = urlparse(final_url)
     if final_url != original_url and parsed_final.path in ("/", "/login", "/login/"):
         signals += 1.0
 
-    body = r.text.lower()
-
-    # --- DOM similarity ---
+    # DOM similarity
     try:
         this_metrics = get_dom_metrics(r.text)
-        if metrics_similar(this_metrics, home_metrics):
+        if home_metrics and metrics_similar(this_metrics, home_metrics):
             signals += 1.0
     except Exception:
         pass
 
-    # --- Hash ---
+    # Hash similarity
     try:
         this_hash = hashlib.md5(r.content).hexdigest()
-        if this_hash == home_hash:
+        if home_hash and this_hash == home_hash:
             signals += 1.5
     except Exception:
         pass
 
-    # --- ) ---
-    length_diff = abs(len(r.content) - home_length)
-    if length_diff < max(500, home_length * 0.05):
-        signals += 1.0
+    # Length similarity
+    try:
+        length_diff = abs(len(r.content) - home_length)
+        if home_length and length_diff < max(500, home_length * 0.05):
+            signals += 1.0
+    except Exception:
+        pass
 
-    # --- SPA / fallback ---
-    spa_markers = (
-        "react-dom", "angular", "vue", "svelte",
-        "next.js", "nuxt.js",
-        "id=\"root\"", "id=\"app\"",
-        "__next_data__", "window.__nuxt__"
-    )
-    if any(x in body for x in spa_markers):
+    # SPA framework markers
+    if any(x in body for x in SPA_MARKERS):
         signals += 1.0
-
-    # --- Heurístics fallback ---
+        
     server_hdr = r.headers.get("server", "").lower()
     if any(x in server_hdr for x in ("cloudflare", "akamai", "fastly")):
-        signals -= 0.5  # CDN puede servir fallback genérico
+        signals -= 0.5
 
     if any(x in body for x in ("login", "signin", "sign in")):
-        signals -= 0.5  # Login reutilizado no siempre es SPA fallback
+        signals -= 0.5
 
-    # ---  ---
-    if signals >= 3:
+
+    if signals >= 3.0:
         return "confirmed"
     elif signals >= 1.5:
         return "uncertain"
     return "no"
 
 
+
 def infer_parent_routes(url: str) -> List[str]:
     parsed = urlparse(url)
-    segments = parsed.path.strip('/').split('/')
+    if "/api/" in parsed.path.lower():
+        return []
+    segments = parsed.path.strip("/").split("/")
     parents = []
-    current = ''
-    for seg in segments[:-1]:  # Exclude leaf
-        current += '/' + seg
-        parent = parsed._replace(path=current.rstrip('/') or '/', query='', fragment='').geturl()
-        parents.append(parent)
+    current = ""
+    for seg in segments[:-1]:
+        current += "/" + seg
+        parents.append(parsed._replace(path=current, query="", fragment="").geturl())
     return parents
+
 
 # =========================
 # DISCOVERY PHASE
@@ -463,9 +606,13 @@ class JSAnalyzer:
             log_js(url)
         self.state.seen_js.add(url)
         try:
-            self.state.register_request(url)
-            r = await client.get(url, timeout=TIMEOUT)
-            code = r.text
+            async with self.state.semaphore:
+                if not self.state.can_request():
+                    return
+                self.state.register_request()
+                r = await client.get(url, timeout=TIMEOUT)
+                code = r.text
+
             # Regex fallback
             for _, path, _ in ENDPOINT_REGEX.findall(code):
                 ep = normalize(url, path)
@@ -474,8 +621,8 @@ class JSAnalyzer:
 
             # Improved AST walking for semantic intent
             try:
-                tree = esprima.parseScript(code, tolerant=True)
-                async def walk(node):
+                tree = esprima.parseModule(code, tolerant=True)
+                def walk(node):
                     if isinstance(node, dict):
                         node_type = node.get("type")
                         if node_type == "CallExpression":
@@ -487,21 +634,23 @@ class JSAnalyzer:
                                     if val.startswith("/") or val.startswith("http"):
                                         ep = normalize(url, val)
                                         if ep:
-                                            await self.state.add_endpoint(ep, "js-fetch")
+                                            asyncio.create_task(self.state.add_endpoint(ep, "js-fetch"))
                             elif callee.get("type") == "Identifier" and callee.get("name") in REACT_ROUTE_FUNCS:
                                 args = node.get("arguments", [])
                                 if args and args[0].get("type") == "Literal":
                                     val = args[0]["value"]
                                     ep = normalize(url, val)
                                     if ep:
-                                        await self.state.add_endpoint(ep, "js-route")
+                                        asyncio.create_task(self.state.add_endpoint(ep, "js-route"))
                         for v in node.values():
                             if isinstance(v, (dict, list)):
-                                await walk(v)
+                                walk(v)
                     elif isinstance(node, list):
                         for i in node:
-                            await walk(i)
-                await walk(tree.body)  # Walk body
+                            walk(i)
+
+                walk(tree.body)
+
             except Exception as e:
                 log_err(f"AST error in {url}: {e}")
 
@@ -521,7 +670,7 @@ class JSAnalyzer:
     async def analyze_sourcemap(self, client: httpx.AsyncClient, js_url: str):
         map_url = js_url + ".map"
         try:
-            self.state.register_request(map_url)
+            self.state.register_request()
             r = await client.get(map_url, timeout=TIMEOUT)
             if r.status_code == 200:
                 sm = r.json()
@@ -554,8 +703,13 @@ class HTMLCrawler:
             self.visited.add(url)
             log_info(f"HTML {url} ({len(self.visited)}/{MAX_HTML_PAGES})")
             try:
-                self.state.register_request(url)
-                r = await client.get(url, timeout=TIMEOUT)
+                async with self.state.semaphore:
+                    if not self.state.can_request():
+                        return
+                    self.state.register_request()
+                    r = await client.get(url, timeout=TIMEOUT)
+
+
                 if "text/html" not in r.headers.get("content-type", ""):
                     continue
                 soup = BeautifulSoup(r.text, "html.parser")
@@ -584,8 +738,12 @@ async def historical_discover(client: httpx.AsyncClient, base_url: str, state: S
     base_netloc = urlparse(base_url).netloc
     cdx_url = f"https://web.archive.org/cdx/search/cdx?url={base_netloc}/*&output=json&fl=original&collapse=urlkey&limit=1000"
     try:
-        state.register_request(cdx_url)
-        r = await client.get(cdx_url, timeout=TIMEOUT)
+        async with state.semaphore:
+            if not state.can_request():
+                return
+            state.register_request()
+            r = await client.get(cdx_url, timeout=TIMEOUT)
+
         if r.status_code == 200:
             data = r.json()
             for entry in data[1:]:
@@ -593,7 +751,7 @@ async def historical_discover(client: httpx.AsyncClient, base_url: str, state: S
                 if same_domain(ep, base_url, False) or '.'.join(urlparse(ep).netloc.split('.')[-2:]) == state.base_domain:
                     await state.add_endpoint(ep, "historical", mark_doubtful=True, allow_host_mismatch=True)
                     state.endpoints[ep]["historical"] = True
-                    state.endpoints[ep]["doubtful"] = True  # Mark as doubtful since archived
+                    state.endpoints[ep]["doubtful"] = True  
     except Exception as e:
         log_err(f"Historical discovery error: {e}")
 
@@ -609,7 +767,6 @@ async def analyze_endpoints(state: State):
             if parent in state.endpoints:
                 state.endpoints[parent]["inferred"] = True
 
-    # Handle dynamics
     for dyn_url in list(set(state.dynamic_urls)):
         if dyn_url not in state.endpoints:
             continue
@@ -637,8 +794,6 @@ async def analyze_endpoints(state: State):
                 if var_url in state.endpoints:
                     state.endpoints[var_url]["inferred"] = True
 
-
-    # Generate backup variants for file-like endpoints
     for url in list(state.endpoints.keys()):
         if url.lower().endswith(VARIANT_FILE_EXTS):
             source = state.endpoints[url]["source"]
@@ -655,7 +810,7 @@ async def get_home_metrics(client: httpx.AsyncClient, home_url: str, state: Stat
     async with state.semaphore:
         if not state.can_request():
             return
-        state.register_request(home_url)
+        state.register_request()
         try:
             r = await client.get(home_url, timeout=TIMEOUT)
             if r.status_code == 200 and 'text/html' in r.headers.get("content-type", ""):
@@ -674,147 +829,179 @@ async def check_if_fallback(client: httpx.AsyncClient, url: str, state: State) -
         if not state.can_request():
             return 'no'
         try:
-            state.register_request(url)
-            r_head = await client.head(url, timeout=TIMEOUT)
-            if r_head.status_code in (301, 302, 303, 307, 308):
-                location = r_head.headers.get("location", "")
-                parsed_loc = urlparse(location)
-                if parsed_loc.path in ("/", "/login", "/login/"):
-                    return 'confirmed'
-        except:
-            pass
-        try:
-            state.register_request(url)
+            state.register_request()
             r = await client.get(url, timeout=TIMEOUT)
-            status = r.status_code
-            if status != 200:
+            if r.status_code != 200:
                 return 'no'
             if state.home_metrics is None:
-                # Degraded mode
-                content_type = r.headers.get("content-type", "")
-                if "text/html" not in content_type:
-                    return 'no'
-                if r.headers.get('server', '').lower() in ['cloudflare', 'akamai']:
-                    return 'uncertain'
-                if len(r.content) < 1000:  # Arbitrary small
-                    return 'uncertain'
-                return 'no'
-            return is_fallback_response(url, r, state.home_metrics, state.home_hash, state.home_length, state.home_content_type)
+                return 'uncertain'
+            return is_fallback_response(
+                url,
+                r,
+                state.home_metrics,
+                state.home_hash,
+                state.home_length,
+                state.home_content_type
+            )
         except:
             return 'no'
+
 
 async def try_bypasses(client: httpx.AsyncClient, url: str, original_response: httpx.Response, state: State):
     parsed = urlparse(url)
     path = parsed.path
-    if not path or path == '/':
+    if not path or path == "/":
         return
-    rel_path = path.lstrip('/')
-    variant_configs = [
-        {'path': path + '/.', 'netloc': parsed.netloc},
-        {'path': '//' + rel_path + '//', 'netloc': parsed.netloc},
-        {'path': path + '/..', 'netloc': parsed.netloc + '.'},
-        {'path': '/.' + rel_path, 'netloc': parsed.netloc},
-        {'path': ':/' + rel_path, 'netloc': parsed.netloc + '.'},
-        {'path': '//;/' + rel_path, 'netloc': parsed.netloc},
-        {'path': path.rstrip('/') + '..;/', 'netloc': parsed.netloc},
-        {'path': '/' + alternate_case(rel_path), 'netloc': parsed.netloc},
-        {'path': '/%2e/' + rel_path, 'netloc': parsed.netloc},
-        {'path': '/%2e%2e/' + rel_path, 'netloc': parsed.netloc},
-        {'path': '/%252e/' + rel_path, 'netloc': parsed.netloc},
-        {'path': '/' + rel_path + '%2f', 'netloc': parsed.netloc},
-        {'path': '/;%2f' + rel_path, 'netloc': parsed.netloc},
-        {'path': '/.%2f' + rel_path, 'netloc': parsed.netloc},
+
+    rel = path.lstrip("/")
+
+    variants = [
+        path + "/.",
+        "//" + rel + "//",
+        path.rstrip("/") + "/..",
+        "/." + rel,
+        "/%2e/" + rel,
+        "/%2e%2e/" + rel,
+        "/%252e/" + rel,
+        "/" + rel + "%2f",
+        "/;%2f" + rel,
+        "/.%2f" + rel,
+        "/" + alternate_case(rel),
     ]
+
     orig_len = len(original_response.content)
-    orig_type = original_response.headers.get('Content-Type', '')
     orig_hash = hashlib.md5(original_response.content).hexdigest()
-    for config in variant_configs:
-        var_url = parsed._replace(netloc=config['netloc'], path=config['path'], query='', fragment='').geturl()
-        try:
-            async with state.semaphore:
-                if not state.can_request():
-                    return
-                state.register_request(var_url)
-                r_head = await client.head(var_url, timeout=TIMEOUT)
-                if r_head.status_code == 200:
-                    state.register_request(var_url)
-                    r_var = await client.get(var_url, timeout=TIMEOUT)
-                    if r_var.status_code == 200:
-                        var_len = len(r_var.content)
-                        var_type = r_var.headers.get('Content-Type', '')
-                        var_hash = hashlib.md5(r_var.content).hexdigest()
-                        if var_len != orig_len or var_type != orig_type or var_hash != orig_hash:
-                            state.successful_bypasses.append(var_url)
-                            state.bypassed.add(url)
-        except:
-            pass
+    orig_type = original_response.headers.get("content-type", "")
+
+    for p in variants:
+        var_url = parsed._replace(path=p, query="", fragment="").geturl()
+
+        async with state.semaphore:
+            if not state.can_request():
+                return
+            try:
+                state.register_request()
+                r = await client.get(var_url, timeout=TIMEOUT)
+            except Exception:
+                continue
+
+
+        if r.status_code == 200:
+            if (
+                len(r.content) != orig_len or
+                r.headers.get("content-type", "") != orig_type or
+                hashlib.md5(r.content).hexdigest() != orig_hash
+            ):
+                state.successful_bypasses.append(var_url)
+                state.bypassed.add(url)
+
+def check_if_fallback_from_response(
+    url: str,
+    r: httpx.Response,
+    state: State
+) -> str:
+    if r.status_code != 200:
+        return "no"
+    if state.home_metrics is None:
+        return "uncertain"
+    return is_fallback_response(
+        url,
+        r,
+        state.home_metrics,
+        state.home_hash,
+        state.home_length,
+        state.home_content_type
+    )
+
 
 async def validate_url(client: httpx.AsyncClient, url: str, state: State, verbose: bool):
     async with state.semaphore:
         if not state.can_request():
             return
+
         try:
-            state.register_request(url)
-            r = await client.head(url, timeout=TIMEOUT)
-            if r.status_code in (404, 405):
-                return
-        except:
-            try:
-                await asyncio.sleep(1)
-                state.register_request(url)
-                r = await client.head(url, timeout=TIMEOUT)
-            except:
-                return
-        try:
-            state.register_request(url)
+            state.register_request()
             r = await client.get(url, timeout=TIMEOUT)
+
             status = r.status_code
-            if status != 404:
-                state.endpoints[url]["status"] = status
-                state.endpoints[url]["content_type"] = r.headers.get("content-type", "")
-                cls = state.endpoints[url]["class"]
-                fallback_status = 'no'
-                if status in (200, 403) and "text/html" in state.endpoints[url]["content_type"]:
-                    fallback_status = await check_if_fallback(client, url, state)
-                state.endpoints[url]["fallback_status"] = fallback_status
-                if fallback_status == 'confirmed':
-                    state.endpoints[url]["fallback"] = True
-                if verbose:
-                    log_ep(f"{url} [{status}] ({cls})", status=status, cls=cls)
-                if "application/json" in state.endpoints[url]["content_type"]:
-                    try:
-                        data = r.json()
-                        await extract_from_json(data, url, client, state)
-                    except:
-                        pass
-                if status == 403:
-                    await try_bypasses(client, url, r, state)
-                # Removed recursive validate_url for backups; handled in analysis
-                if status in (200, 401, 403):
-                    entry = {
-                        "url": url,
-                        "status": status,
-                        "class": cls,
-                        "priority": CLASS_PRIORITY.get(cls, 0),
-                        "is_dynamic": state.endpoints[url].get("is_dynamic", False),
-                        "fallback": state.endpoints[url].get("fallback", False),
-                        "doubtful": state.endpoints[url].get("doubtful", False),
-                        "inferred": state.endpoints[url].get("inferred", False),
-                        "historical": state.endpoints[url].get("historical", False),
-                        "fallback_status": fallback_status,
-                    }
-                    if status == 403:
-                        entry["bypassed"] = url in state.bypassed
-                        if url not in {e["url"] for e in state.ep_list}:
-                            state.ep_list.append(entry)
-                    else:
-                        if url.lower().endswith(".php"):
-                            state.php_list.append(entry)
-                        else:
-                            state.ep_list.append(entry)
-                    # Removed 'and not entry["fallback"]'; always append, mark instead
+            if status == 404:
+                return
+
+            ep = state.endpoints.get(url)
+            if not ep:
+                return
+
+            ep["status"] = status
+            ep["content_type"] = r.headers.get("content-type", "")
+
+            fallback_status = "no"
+            if status in (200, 403):
+                fallback_status = check_if_fallback_from_response(url, r, state)
+
+            ep["fallback_status"] = fallback_status
+            ep["fallback"] = fallback_status == "confirmed"
+
+            if status == 200:
+                content_type = ep["content_type"].lower()
+
+                if "text/html" in content_type and is_soft_404(r):
+                    return
+
+                try:
+                    home_hash = state.home_hash
+                    home_length = state.home_length
+
+                    this_hash = hashlib.md5(r.content).hexdigest()
+                    length_diff = abs(len(r.content) - home_length)
+
+                    if (
+                        home_hash
+                        and this_hash == home_hash
+                        and length_diff < max(300, home_length * 0.03)
+                    ):
+                        return
+                except Exception:
+                    pass
+
+                if (
+                    fallback_status == "no"
+                    and ep.get("inferred")
+                    and ep.get("doubtful")
+                ):
+                    return
+
+            cls = ep["class"]
+
+            if verbose:
+                log_ep(f"{url} [{status}] ({cls})", status=status, cls=cls)
+
+            if status == 403:
+                await try_bypasses(client, url, r, state)
+
+            if status in (200, 401, 403):
+                entry = {
+                    "url": url,
+                    "status": status,
+                    "class": cls,
+                    "priority": CLASS_PRIORITY.get(cls, 0),
+                    "is_dynamic": ep.get("is_dynamic", False),
+                    "fallback": ep.get("fallback", False),
+                    "doubtful": ep.get("doubtful", False),
+                    "inferred": ep.get("inferred", False),
+                    "historical": ep.get("historical", False),
+                    "fallback_status": fallback_status,
+                    "bypassed": url in state.bypassed
+                }
+
+                if url.lower().endswith(".php"):
+                    state.php_list.append(entry)
+                else:
+                    state.ep_list.append(entry)
+
         except Exception as e:
             log_err(f"Error validating {url}: {e}")
+
+
 
 async def extract_from_json(data: Any, base: str, client: httpx.AsyncClient, state: State, depth: int = 0):
     if depth > MAX_JSON_DEPTH:
@@ -828,7 +1015,7 @@ async def extract_from_json(data: Any, base: str, client: httpx.AsyncClient, sta
     elif isinstance(data, str):
         for _, path, _ in ENDPOINT_REGEX.findall(data):
             ep = normalize(base, path)
-            if ep and same_domain(ep, base, True):  # Allow sub for JSON extracts
+            if ep and same_domain(ep, base, True):
                 await state.add_endpoint(ep, "json-extract")
 
 # =========================
@@ -868,8 +1055,12 @@ async def main(args):
             # Validation Phase
             log_progress("Starting Validation Phase...")
             await get_home_metrics(client, target, state)
-            tasks = [validate_url(client, ep, state, verbose) for ep in list(state.endpoints.keys())]
-            await asyncio.gather(*tasks)
+            def chunked(lst, size):
+                for i in range(0, len(lst), size):
+                    yield lst[i:i + size]
+
+            for chunk in chunked(list(state.endpoints.keys()), 200):
+                await asyncio.gather(*(validate_url(client, ep, state, verbose) for ep in chunk))
 
     # Output
     print("\n" + "=" * 60)
