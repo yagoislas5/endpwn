@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 from colorama import Fore, Back, Style, init
 import pickle
 import hashlib
+from typing import Optional
 
 init(autoreset=True)
 
@@ -26,7 +27,7 @@ USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) Chrome/120 Safari/537.36"
 TIMEOUT = 10
 MAX_HTML_PAGES = 50
 MAX_CONCURRENCY = 50
-MAX_ROUTE_LIMIT = 1000  # Configurable limit for routes only
+MAX_ROUTE_LIMIT = 1000 
 IGNORE_EXT = (
     ".jpg", ".jpeg", ".png", ".gif", ".svg", ".ico",
     ".mp4", ".mp3", ".avi", ".mov", ".mkv",
@@ -45,7 +46,7 @@ ENDPOINT_REGEX = re.compile(
 DYNAMIC_PATTERNS = re.compile(r'/(:[^/]+|\{[^}]+\}|\$\{[^}]+\})')
 REACT_ROUTE_KEYS = ("path", "to", "href")
 REACT_ROUTE_FUNCS = ("navigate", "push", "replace", "Link", "useNavigate")
-FETCH_FUNCS = ("fetch", "axios", "XMLHttpRequest", "$http")  # Added for semantic extraction
+FETCH_FUNCS = ("fetch", "axios", "XMLHttpRequest", "$http")
 CLASSIFY_REGEX = {
     "auth": re.compile(r"auth|login|token|oauth", re.I),
     "admin": re.compile(r"admin|manage|panel|internal", re.I),
@@ -182,6 +183,10 @@ SOFT_404_PATTERNS = [
     r"oops.*not found",
     r"not exist",
     r"Back to home",
+    r"Hups!",
+    r"Hups",
+    r"hups",
+    r"hoops",
 ]
 SOFT_404_REGEX = re.compile(
     "|".join(SOFT_404_PATTERNS),
@@ -277,12 +282,12 @@ class State:
         netloc = urlparse(url).netloc
         domain = '.'.join(netloc.split('.')[-2:]) if len(netloc.split('.')) > 1 else netloc
         if source == "historical" and allow_host_mismatch and domain == self.base_domain:
-            pass  # Allow for historical
+            pass 
         elif netloc != self.base_netloc and not netloc.endswith("." + self.base_netloc):
             return
         canon = self.canonical_url(url)
         if canon in self.canon_to_original:
-            return  # Dedupe
+            return 
         self.canon_to_original[canon] = url
         cls = self.classify(url)
         params = self.extract_params(url)
@@ -290,7 +295,7 @@ class State:
         is_dynamic = bool(DYNAMIC_PATTERNS.search(urlparse(url).path))
         is_route = self.is_route(url)
         if is_route and len(self.routes) >= self.route_limit and not self.directory_focused:
-            return  # Limit routes if not focused
+            return  
         host_mismatch = (netloc != self.base_netloc and not netloc.endswith("." + self.base_netloc))
         self.endpoints[url] = {
             "url": url,
@@ -307,12 +312,12 @@ class State:
             "is_dynamic": is_dynamic,
             "is_route": is_route,
             "fallback": False,
-            "doubtful": mark_doubtful,  
+            "doubtful": mark_doubtful, 
             "inferred": False,
             "historical": False,
             "fallback_candidate": False, 
             "host_mismatch": host_mismatch,
-            "fallback_status": None, 
+            "fallback_status": None,  
         }
         if is_dynamic:
             self.dynamic_urls.append(url)
@@ -350,7 +355,7 @@ def same_domain(url: str, base: str, allow_sub: bool) -> bool:
     except:
         return False
 
-def normalize(base: str, link: str) -> str | None:
+def normalize(base: str, link: str) -> Optional[str]:
     try:
         return urljoin(base, link.strip())
     except:
@@ -379,8 +384,8 @@ def get_dom_metrics(html: str) -> Tuple[int, int, int, bool, bool, int, bool]:
     dom_depth = max_depth(soup)
     has_bootstrap = any("root" in str(tag) or "app" in str(tag) for tag in soup.find_all(id=True))
     has_js_redirect = bool(re.search(r'window\.location|history\.pushstate', html, re.I))
-    links = len(soup.find_all('a'))  # Added for more robustness
-    has_framework = any(x in html.lower() for x in ["react", "angular", "vue", "svelte", "next.js", "nuxt"])  # Expanded frameworks
+    links = len(soup.find_all('a')) 
+    has_framework = any(x in html.lower() for x in ["react", "angular", "vue", "svelte", "next.js", "nuxt"]) 
     return forms, scripts, dom_depth, has_bootstrap, has_js_redirect, links, has_framework
 
 def metrics_similar(m1: Tuple, m2: Tuple) -> bool:
@@ -390,7 +395,7 @@ def metrics_similar(m1: Tuple, m2: Tuple) -> bool:
         abs(f1 - f2) <= 1 and
         abs(s1 - s2) <= 2 and
         abs(d1 - d2) <= 3 and
-        abs(l1 - l2) <= 5 and
+        abs(l1 - l2) <= 5 and 
         b1 == b2 and
         r1 == r2 and
         fw1 == fw2
@@ -526,12 +531,10 @@ def is_fallback_response(
 
     signals += 1.0 
 
-    # Redirect a home/login
     parsed_final = urlparse(final_url)
     if final_url != original_url and parsed_final.path in ("/", "/login", "/login/"):
         signals += 1.0
 
-    # DOM similarity
     try:
         this_metrics = get_dom_metrics(r.text)
         if home_metrics and metrics_similar(this_metrics, home_metrics):
@@ -539,7 +542,6 @@ def is_fallback_response(
     except Exception:
         pass
 
-    # Hash similarity
     try:
         this_hash = hashlib.md5(r.content).hexdigest()
         if home_hash and this_hash == home_hash:
@@ -547,7 +549,6 @@ def is_fallback_response(
     except Exception:
         pass
 
-    # Length similarity
     try:
         length_diff = abs(len(r.content) - home_length)
         if home_length and length_diff < max(500, home_length * 0.05):
@@ -555,7 +556,6 @@ def is_fallback_response(
     except Exception:
         pass
 
-    # SPA framework markers
     if any(x in body for x in SPA_MARKERS):
         signals += 1.0
         
@@ -605,6 +605,7 @@ class JSAnalyzer:
             self.state.js_list.append(url)
             log_js(url)
         self.state.seen_js.add(url)
+
         try:
             async with self.state.semaphore:
                 if not self.state.can_request():
@@ -613,15 +614,15 @@ class JSAnalyzer:
                 r = await client.get(url, timeout=TIMEOUT)
                 code = r.text
 
-            # Regex fallback
             for _, path, _ in ENDPOINT_REGEX.findall(code):
                 ep = normalize(url, path)
                 if ep and same_domain(ep, self.base, self.allow_subdomains) and not ignored(ep):
                     await self.state.add_endpoint(ep, "js-regex", mark_doubtful=True)
 
-            # Improved AST walking for semantic intent
             try:
                 tree = esprima.parseModule(code, tolerant=True)
+                new_endpoints = []
+
                 def walk(node):
                     if isinstance(node, dict):
                         node_type = node.get("type")
@@ -634,14 +635,7 @@ class JSAnalyzer:
                                     if val.startswith("/") or val.startswith("http"):
                                         ep = normalize(url, val)
                                         if ep:
-                                            asyncio.create_task(self.state.add_endpoint(ep, "js-fetch"))
-                            elif callee.get("type") == "Identifier" and callee.get("name") in REACT_ROUTE_FUNCS:
-                                args = node.get("arguments", [])
-                                if args and args[0].get("type") == "Literal":
-                                    val = args[0]["value"]
-                                    ep = normalize(url, val)
-                                    if ep:
-                                        asyncio.create_task(self.state.add_endpoint(ep, "js-route"))
+                                            new_endpoints.append(ep)
                         for v in node.values():
                             if isinstance(v, (dict, list)):
                                 walk(v)
@@ -651,21 +645,30 @@ class JSAnalyzer:
 
                 walk(tree.body)
 
+                try:
+                    for ep in new_endpoints:
+                        if same_domain(ep, self.base, self.allow_subdomains) and not ignored(ep):
+                            await self.state.add_endpoint(ep, "js-fetch")
+                except Exception as e:
+                    log_err(f"AST error adding endpoints from {url} : {e}")
+
             except Exception as e:
-                log_err(f"AST error in {url}: {e}")
+                log_err(f"AST parsing error in {url} : {e}")
 
-            # Imports
-            import_rx = re.compile(r'import\((["\'`])(.+?)\1\)', re.I)
-            for _, imp_path in import_rx.findall(code):
-                imp_url = normalize(url, imp_path)
-                if imp_url and same_domain(imp_url, self.base, self.allow_subdomains) and not ignored(imp_url):
-                    await self.analyze_js(client, imp_url, depth + 1)
+            try:
+                import_rx = re.compile(r'import\((["\'`])(.+?)\1\)', re.I)
+                for _, imp_path in import_rx.findall(code):
+                    imp_url = normalize(url, imp_path)
+                    if imp_url and same_domain(imp_url, self.base, self.allow_subdomains) and not ignored(imp_url):
+                        await self.analyze_js(client, imp_url, depth + 1)
+            except Exception as e:
+                log_err(f"Error handling dynamic imports in {url} : {e}")
 
-            # Sourcemap
             if url.endswith(".js"):
                 await self.analyze_sourcemap(client, url)
+
         except Exception as e:
-            log_err(f"Error analyzing JS {url}: {e}")
+            log_err(f"Error analyzing JS {url} : {e}")
 
     async def analyze_sourcemap(self, client: httpx.AsyncClient, js_url: str):
         map_url = js_url + ".map"
@@ -679,8 +682,9 @@ class JSAnalyzer:
                     ep = normalize(js_url, clean_path)
                     if ep and same_domain(ep, self.base, self.allow_subdomains) and not ignored(ep) and not is_noise_js(ep):
                         await self.state.add_endpoint(ep, "sourcemap-path")
-        except:
+        except Exception:
             pass
+
 
 class HTMLCrawler:
     def __init__(self, base_url: str, allow_subdomains: bool, js_engine: JSAnalyzer, state: State):
@@ -696,7 +700,6 @@ class HTMLCrawler:
             url = self.queue.pop(0)
             if url in self.visited:
                 continue
-            # Check semantic depth
             path_segments = len(urlparse(url).path.strip('/').split('/'))
             if path_segments > SEMANTIC_DEPTH_LIMIT:
                 continue
@@ -713,12 +716,11 @@ class HTMLCrawler:
                 if "text/html" not in r.headers.get("content-type", ""):
                     continue
                 soup = BeautifulSoup(r.text, "html.parser")
-                # Extract scripts
                 for s in soup.find_all("script", src=True):
                     js_url = normalize(url, s["src"])
                     if js_url and same_domain(js_url, self.base, self.allow_subdomains) and not ignored(js_url) and not is_noise_js(js_url):
                         await self.js.analyze_js(client, js_url)
-                # Extract links/forms
+              
                 for tag in soup.find_all(["a", "form"]):
                     attr = tag.get("href") or tag.get("action")
                     if attr:
@@ -726,13 +728,12 @@ class HTMLCrawler:
                         if nxt and same_domain(nxt, self.base, self.allow_subdomains) and not ignored(nxt):
                             await self.state.add_endpoint(nxt, "html")
                             if len(self.visited) < MAX_HTML_PAGES:
-                                # Prioritize routes in directory-focused
                                 if self.state.directory_focused and self.state.is_route(nxt):
-                                    self.queue.insert(0, nxt)  # Prioritize by inserting front
+                                    self.queue.insert(0, nxt)  
                                 else:
                                     self.queue.append(nxt)
             except Exception as e:
-                log_err(f"Error crawling {url}: {e}")
+                log_err(f"Error crawling {url} : {e}")
 
 async def historical_discover(client: httpx.AsyncClient, base_url: str, state: State):
     base_netloc = urlparse(base_url).netloc
@@ -751,15 +752,14 @@ async def historical_discover(client: httpx.AsyncClient, base_url: str, state: S
                 if same_domain(ep, base_url, False) or '.'.join(urlparse(ep).netloc.split('.')[-2:]) == state.base_domain:
                     await state.add_endpoint(ep, "historical", mark_doubtful=True, allow_host_mismatch=True)
                     state.endpoints[ep]["historical"] = True
-                    state.endpoints[ep]["doubtful"] = True  
+                    state.endpoints[ep]["doubtful"] = True 
     except Exception as e:
-        log_err(f"Historical discovery error: {e}")
+        log_err(f"Historical discovery error : {e}")
 
 # =========================
 # ANALYSIS PHASE
 # =========================
 async def analyze_endpoints(state: State):
-    # Infer parents for all
     for url in list(state.endpoints.keys()):
         parents = infer_parent_routes(url)
         for parent in parents:
@@ -781,8 +781,6 @@ async def analyze_endpoints(state: State):
             state.endpoints[clean_url]["fallback_candidate"] = True
             state.endpoints[clean_url]["inferred"] = True
 
-
-        # Generate variants
         cls = state.endpoints[dyn_url]["class"]
         values = EXPLOIT_VALUES + CONTEXT_VALUES.get(cls, [])
         for val in values:
@@ -793,6 +791,7 @@ async def analyze_endpoints(state: State):
                 await state.add_endpoint(var_url, source + "-variant", mark_doubtful=True)
                 if var_url in state.endpoints:
                     state.endpoints[var_url]["inferred"] = True
+
 
     for url in list(state.endpoints.keys()):
         if url.lower().endswith(VARIANT_FILE_EXTS):
@@ -819,8 +818,8 @@ async def get_home_metrics(client: httpx.AsyncClient, home_url: str, state: Stat
                 state.home_hash = hashlib.md5(r.content).hexdigest()
                 state.home_metrics = get_dom_metrics(r.text)
         except Exception as e:
-            log_err(f"Error getting home metrics: {e}")
-            state.home_metrics = (0, 0, 0, False, False, 0, False)  # Fallback to zero metrics
+            log_err(f"Error getting home metrics : {e}")
+            state.home_metrics = (0, 0, 0, False, False, 0, False) 
             state.home_length = 0
             state.home_hash = ''
 
@@ -999,7 +998,7 @@ async def validate_url(client: httpx.AsyncClient, url: str, state: State, verbos
                     state.ep_list.append(entry)
 
         except Exception as e:
-            log_err(f"Error validating {url}: {e}")
+            log_err(f"Error validating {url} : {e}")
 
 
 
@@ -1041,18 +1040,15 @@ async def main(args):
     crawler = HTMLCrawler(target, allow_sub, js_engine, state)
 
     async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=TIMEOUT) as client:
-        # Discovery Phase
         log_progress("Starting Discovery Phase...")
         await crawler.crawl(client)
         if historical:
             await historical_discover(client, target, state)
 
-        # Analysis Phase
         log_progress("Starting Analysis Phase...")
         await analyze_endpoints(state)
 
         if not enum_only:
-            # Validation Phase
             log_progress("Starting Validation Phase...")
             await get_home_metrics(client, target, state)
             def chunked(lst, size):
@@ -1060,9 +1056,8 @@ async def main(args):
                     yield lst[i:i + size]
 
             for chunk in chunked(list(state.endpoints.keys()), 200):
-                await asyncio.gather(*(validate_url(client, ep, state, verbose) for ep in chunk))
+                await asyncio.gather(*(validate_url(client, ep, state, verbose) for ep in chunk), return_exceptions=True)
 
-    # Output
     print("\n" + "=" * 60)
     if state.js_list:
         print(f"{Fore.CYAN}[+] JS encontrados ({len(state.js_list)}):{Style.RESET_ALL}")
@@ -1114,14 +1109,25 @@ async def main(args):
         for bypass in sorted(set(state.successful_bypasses)):
             print(Back.CYAN + Fore.BLACK + bypass + Style.RESET_ALL)
 
+    if args.save_js and state.js_list:
+        try:
+            with open(args.save_js, "w") as f:
+                for js in sorted(set(state.js_list)):
+                    f.write(js + "\n")
+            log_info(f"JS URLs saved to {args.save_js}")
+        except Exception as e:
+            log_err(f"Failed to save JS URLs: {e}")
+
+state = None
 def stop_signal(sig, frame):
     global state
-    if state:
+    if state is not None:
         state.stop = True
     print("\n[!] Interrumpido por el usuario")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, stop_signal)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Advanced Recursive Endpoint Discovery Engine")
@@ -1133,5 +1139,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-historical",action="store_true",help="Disable historical route discovery (Wayback Machine)")
     parser.add_argument("--max-requests", type=int, default=500000, help="Max HTTP requests")
     parser.add_argument("--route-limit", type=int, default=MAX_ROUTE_LIMIT, help="Max routes to collect")
+    parser.add_argument("--js", type=str, help="Save collected JS URLs to a file")
     args = parser.parse_args()
     asyncio.run(main(args))
+
