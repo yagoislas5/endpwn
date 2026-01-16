@@ -11,7 +11,7 @@ The design prioritizes coverage without losing endpoints, clearly decoupling the
 ## Installation
 
 ```bash
-git clone https://github.com/tuusuario/endpwn.git
+git clone https://github.com/yagoislas5/endpwn
 cd endpwn
 python3 -m venv .venv
 source .venv/bin/activate
