@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =========================
-# ENDPWN V1.2.4
+# ENDPWN V1.2.0
 # =========================
 import argparse
 import asyncio
@@ -229,12 +229,13 @@ KEYWORDS = {
     "GH_TOKEN": re.compile(
         r'\bgh[pousr]_[a-zA-Z0-9]{36,255}\b|\bgithub_pat_[a-zA-Z0-9_]{20,255}\b',
         re.I
-    )
+    ),
     "JS_MAP": re.compile(
         r'\b[a-zA-Z0-9._-]{4,100}\.js\.map\b',
         re.I
     )
 }
+
 
 TYPE_STYLES = {
     "js":  ("JS", Fore.YELLOW),
@@ -255,6 +256,7 @@ FINDING_COLORS = {
         "JWT": Fore.RED,
         "PW": Fore.LIGHTRED_EX,
         "FUNC": Fore.GREEN,
+        "JS_MAP": Fore.LIGHTCYAN_EX,
 }
 
 # =========================
