@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =========================
-# ENDPWN V1.0.4
+# ENDPWN V1.2.4
 # =========================
 import argparse
 import asyncio
@@ -26,7 +26,7 @@ init(autoreset=True)
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) Chrome/120 Safari/537.36"
 TIMEOUT = 10
 MAX_HTML_PAGES = 50
-MAX_CONCURRENCY = 50
+MAX_CONCURRENCY = 40
 MAX_ROUTE_LIMIT = 1000 
 IGNORE_EXT = (
     ".jpg", ".jpeg", ".png", ".gif", ".svg", ".ico",
@@ -158,6 +158,11 @@ BACKUP_EXTS = [
     ".env", ".env.local", ".env.prod"
 ]
 
+BACKUP_SUFFIX_REGEX = re.compile(
+    r'(\.(?:orig|cfg|conf|ini|log|txt|yaml|yml|toml|temp|tmp|bak|backup|debug)|~)$',
+    re.I
+)
+
 VARIANT_FILE_EXTS = (
     ".js", ".map",
     ".json",
@@ -193,9 +198,101 @@ SOFT_404_REGEX = re.compile(
     re.I
 )
 
+KEYWORDS = {
+    "ID": re.compile(
+        r'\b(id|userId|accountId|clientId|sessionId)\b\s*[:=]\s*["\']?([a-zA-Z0-9_-]{6,64})["\']?',
+        re.I
+    ),
+    "TK": re.compile(
+        r'\b(token|apiKey|apikey|authToken|accessToken)\b\s*[:=]\s*["\']?([a-zA-Z0-9_\-\.]{20,200})["\']?',
+        re.I
+    ),
+    "JWT": re.compile(
+        r'\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b'
+    ),
+    "PW": re.compile(
+        r'\b(password|passwd|pwd|secret)\b\s*[:=]\s*["\']([^"\']{6,100})["\']',
+        re.I
+    ),
+    "FUNC": re.compile(
+        r'\b(function\s+([a-zA-Z0-9_]{3,})\b|([a-zA-Z0-9_]{3,})\s*=\s*function\b|([a-zA-Z0-9_]{3,})\s*=\s*\([^)]*\)\s*=>)',
+        re.I
+    ),
+    "GH": re.compile(
+        r'\bhttps?:\/\/github\.com\/[a-zA-Z0-9_.-]{1,39}\/[a-zA-Z0-9_.-]{1,100}(?:\/[^\s"\'<>]*)?',
+        re.I
+    ),
+    "GH_RAW": re.compile(
+        r'\bhttps?:\/\/raw\.githubusercontent\.com\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+\/[^\s"\'<>]+',
+        re.I
+    ),
+    "GH_TOKEN": re.compile(
+        r'\bgh[pousr]_[a-zA-Z0-9]{36,255}\b|\bgithub_pat_[a-zA-Z0-9_]{20,255}\b',
+        re.I
+    )
+    "JS_MAP": re.compile(
+        r'\b[a-zA-Z0-9._-]{4,100}\.js\.map\b',
+        re.I
+    )
+}
+
+TYPE_STYLES = {
+    "js":  ("JS", Fore.YELLOW),
+    "json":("J",  Fore.LIGHTYELLOW_EX),
+    "php": ("PHP",Fore.MAGENTA),
+    "html":("HTML",Fore.CYAN),
+    "xml": ("XML",Fore.BLUE),
+    "txt": ("TXT",Fore.WHITE),
+    "other":("EP", Fore.LIGHTBLACK_EX),
+}
+
+FINDING_COLORS = {
+        "ID": Fore.CYAN,
+        "GH": Fore.MAGENTA,
+        "GH_RAW": Fore.LIGHTMAGENTA_EX,
+        "GH_TOKEN": Fore.RED,
+        "TK": Fore.YELLOW,
+        "JWT": Fore.RED,
+        "PW": Fore.LIGHTRED_EX,
+        "FUNC": Fore.GREEN,
+}
 
 # =========================
 # =========================
+def detect_type(url: str, content_type: str) -> str:
+    u = url.lower()
+    ct = (content_type or "").lower()
+
+    if u.endswith(".js") or "javascript" in ct:
+        return "js"
+    if u.endswith(".json") or "application/json" in ct:
+        return "json"
+    if u.endswith(".php"):
+        return "php"
+    if "text/html" in ct:
+        return "html"
+    if "xml" in ct:
+        return "xml"
+    if u.endswith(".txt"):
+        return "txt"
+    return "other"
+
+def split_backup_variant(url: str) -> tuple[str, str | None]:
+    m = BACKUP_SUFFIX_REGEX.search(url)
+    if not m:
+        return url, None
+    return url[:m.start()], m.group(1)
+
+async def analyze_for_secrets(url: str, code: str, findings: List[str]):
+    for key, regex in KEYWORDS.items():
+        for match in regex.findall(code):
+            if isinstance(match, tuple):
+                val = match[-1]
+            else:
+                val = match
+            if val and len(val) > 0 and len(val) < 150:
+                findings.append(f"[{key}] {url} : {val}")
+                
 class State:
     def __init__(self, max_requests: int, directory_focused: bool, route_limit: int):
         self.max_requests = max_requests
@@ -234,6 +331,9 @@ class State:
 
     def register_request(self):
         self.requests += 1
+        if self.requests >= self.max_requests:
+            self.stop = True
+
 
     def can_request(self) -> bool:
         return self.requests < self.max_requests and not self.stop
@@ -281,10 +381,11 @@ class State:
             return
         netloc = urlparse(url).netloc
         domain = '.'.join(netloc.split('.')[-2:]) if len(netloc.split('.')) > 1 else netloc
-        if source == "historical" and allow_host_mismatch and domain == self.base_domain:
-            pass 
+        if source == "historical" and allow_host_mismatch:
+            pass
         elif netloc != self.base_netloc and not netloc.endswith("." + self.base_netloc):
             return
+
         canon = self.canonical_url(url)
         if canon in self.canon_to_original:
             return 
@@ -407,7 +508,12 @@ def is_soft_404(r: httpx.Response) -> bool:
         if "text/html" not in content_type:
             return False
 
-        body = r.text.lower()
+        try:
+            body = r.text
+        except UnicodeDecodeError:
+            body = r.content.decode("utf-8", errors="ignore")
+        body = body.lower()
+
 
         if SOFT_404_REGEX.search(body):
             return True
@@ -602,8 +708,9 @@ class JSAnalyzer:
         if url in self.state.seen_js or depth > MAX_JS_DEPTH:
             return
         if url.lower().endswith(".js") and "://" in url and not is_noise_js(url):
-            self.state.js_list.append(url)
-            log_js(url)
+            if url not in self.state.js_list:
+                self.state.js_list.append(url)
+                log_js(url)
         self.state.seen_js.add(url)
 
         try:
@@ -611,18 +718,29 @@ class JSAnalyzer:
                 if not self.state.can_request():
                     return
                 self.state.register_request()
-                r = await client.get(url, timeout=TIMEOUT)
-                code = r.text
+                try:
+                    r = await client.get(url, timeout=TIMEOUT)
+                    code = r.text
+                except UnicodeDecodeError:
+                    code = r.content.decode("utf-8", errors="ignore")
 
             for _, path, _ in ENDPOINT_REGEX.findall(code):
                 ep = normalize(url, path)
                 if ep and same_domain(ep, self.base, self.allow_subdomains) and not ignored(ep):
                     await self.state.add_endpoint(ep, "js-regex", mark_doubtful=True)
 
+            new_endpoints = set()
+            
+            findings = getattr(self.state, "findings", [])
+            await analyze_for_secrets(url, code, findings)
+            self.state.findings = findings
+
             try:
                 tree = esprima.parseModule(code, tolerant=True)
-                new_endpoints = []
+            except Exception:
+                tree = None
 
+            if tree:
                 def walk(node):
                     if isinstance(node, dict):
                         node_type = node.get("type")
@@ -632,11 +750,10 @@ class JSAnalyzer:
                                 args = node.get("arguments", [])
                                 if args and args[0].get("type") == "Literal" and isinstance(args[0].get("value"), str):
                                     val = args[0]["value"]
-                                    if val.startswith("/") or val.startswith("http"):
-                                        ep = normalize(url, val)
-                                        if ep:
-                                            new_endpoints.append(ep)
-                        for v in node.values():
+                                    ep = normalize(url, val)
+                                    if ep and ep not in self.state.seen_js:
+                                        new_endpoints.add(ep)
+                        for v in node.values() if node else []:
                             if isinstance(v, (dict, list)):
                                 walk(v)
                     elif isinstance(node, list):
@@ -645,15 +762,9 @@ class JSAnalyzer:
 
                 walk(tree.body)
 
-                try:
-                    for ep in new_endpoints:
-                        if same_domain(ep, self.base, self.allow_subdomains) and not ignored(ep):
-                            await self.state.add_endpoint(ep, "js-fetch")
-                except Exception as e:
-                    log_err(f"AST error adding endpoints from {url} : {e}")
-
-            except Exception as e:
-                log_err(f"AST parsing error in {url} : {e}")
+                for ep in new_endpoints:
+                    if same_domain(ep, self.base, self.allow_subdomains) and not ignored(ep):
+                        await self.state.add_endpoint(ep, "js-fetch")
 
             try:
                 import_rx = re.compile(r'import\((["\'`])(.+?)\1\)', re.I)
@@ -670,20 +781,27 @@ class JSAnalyzer:
         except Exception as e:
             log_err(f"Error analyzing JS {url} : {e}")
 
+
     async def analyze_sourcemap(self, client: httpx.AsyncClient, js_url: str):
         map_url = js_url + ".map"
-        try:
-            self.state.register_request()
-            r = await client.get(map_url, timeout=TIMEOUT)
-            if r.status_code == 200:
-                sm = r.json()
-                for orig in sm.get("sources", []):
-                    clean_path = re.sub(r'^(webpack:///\.?/|~|@|\?\?)/?', '', orig)
-                    ep = normalize(js_url, clean_path)
-                    if ep and same_domain(ep, self.base, self.allow_subdomains) and not ignored(ep) and not is_noise_js(ep):
-                        await self.state.add_endpoint(ep, "sourcemap-path")
-        except Exception:
-            pass
+        r = await client.get(map_url, timeout=TIMEOUT)
+        if r.status_code == 200:
+            try:
+                try:
+                    sm = r.json()
+                except Exception:
+                    try:
+                        sm = json.loads(r.content.decode("utf-8", errors="ignore"))
+                    except Exception:
+                        sm = None
+                if sm:
+                    for orig in sm.get("sources", []):
+                        clean_path = re.sub(r'^(webpack:///\.?/|~|@|\?\?)/?', '', orig)
+                        ep = normalize(js_url, clean_path)
+                        if ep and same_domain(ep, self.base, self.allow_subdomains) and not ignored(ep) and not is_noise_js(ep):
+                            await self.state.add_endpoint(ep, "sourcemap-path")
+            except Exception:
+                pass
 
 
 class HTMLCrawler:
@@ -726,12 +844,14 @@ class HTMLCrawler:
                     if attr:
                         nxt = normalize(url, attr)
                         if nxt and same_domain(nxt, self.base, self.allow_subdomains) and not ignored(nxt):
-                            await self.state.add_endpoint(nxt, "html")
-                            if len(self.visited) < MAX_HTML_PAGES:
-                                if self.state.directory_focused and self.state.is_route(nxt):
-                                    self.queue.insert(0, nxt)  
-                                else:
-                                    self.queue.append(nxt)
+                            if nxt not in self.visited and nxt not in self.queue:
+                                await self.state.add_endpoint(nxt, "html")
+                                if len(self.visited) + len(self.queue) < MAX_HTML_PAGES:
+                                    if self.state.directory_focused and self.state.is_route(nxt):
+                                        self.queue.insert(0, nxt)
+                                    else:
+                                        self.queue.append(nxt)
+
             except Exception as e:
                 log_err(f"Error crawling {url} : {e}")
 
@@ -747,12 +867,20 @@ async def historical_discover(client: httpx.AsyncClient, base_url: str, state: S
 
         if r.status_code == 200:
             data = r.json()
+            try:
+                data = r.json()
+            except Exception:
+                data = []
             for entry in data[1:]:
+                if not entry or len(entry) < 1:
+                    continue
                 ep = entry[0]
                 if same_domain(ep, base_url, False) or '.'.join(urlparse(ep).netloc.split('.')[-2:]) == state.base_domain:
                     await state.add_endpoint(ep, "historical", mark_doubtful=True, allow_host_mismatch=True)
-                    state.endpoints[ep]["historical"] = True
-                    state.endpoints[ep]["doubtful"] = True 
+                    if ep in state.endpoints:
+                        state.endpoints[ep]["historical"] = True
+                        state.endpoints[ep]["doubtful"] = True
+
     except Exception as e:
         log_err(f"Historical discovery error : {e}")
 
@@ -788,10 +916,10 @@ async def analyze_endpoints(state: State):
             var_path = re.sub(r'//+', '/', var_path)
             var_url = parsed._replace(path=var_path, query='', fragment='').geturl()
             if var_url != dyn_url:
-                await state.add_endpoint(var_url, source + "-variant", mark_doubtful=True)
-                if var_url in state.endpoints:
-                    state.endpoints[var_url]["inferred"] = True
-
+                if var_url not in state.canon_to_original:
+                    await state.add_endpoint(var_url, source + "-variant", mark_doubtful=True)
+                    if var_url in state.endpoints:
+                        state.endpoints[var_url]["inferred"] = True
 
     for url in list(state.endpoints.keys()):
         if url.lower().endswith(VARIANT_FILE_EXTS):
@@ -816,7 +944,11 @@ async def get_home_metrics(client: httpx.AsyncClient, home_url: str, state: Stat
                 state.home_content_type = r.headers.get("content-type", "")
                 state.home_length = len(r.content)
                 state.home_hash = hashlib.md5(r.content).hexdigest()
-                state.home_metrics = get_dom_metrics(r.text)
+                try:
+                    html = r.text
+                except UnicodeDecodeError:
+                    html = r.content.decode("utf-8", errors="ignore")
+                state.home_metrics = get_dom_metrics(html)
         except Exception as e:
             log_err(f"Error getting home metrics : {e}")
             state.home_metrics = (0, 0, 0, False, False, 0, False) 
@@ -874,6 +1006,8 @@ async def try_bypasses(client: httpx.AsyncClient, url: str, original_response: h
 
     for p in variants:
         var_url = parsed._replace(path=p, query="", fragment="").geturl()
+        if var_url in state.successful_bypasses:
+            continue
 
         async with state.semaphore:
             if not state.can_request():
@@ -884,7 +1018,6 @@ async def try_bypasses(client: httpx.AsyncClient, url: str, original_response: h
             except Exception:
                 continue
 
-
         if r.status_code == 200:
             if (
                 len(r.content) != orig_len or
@@ -893,6 +1026,7 @@ async def try_bypasses(client: httpx.AsyncClient, url: str, original_response: h
             ):
                 state.successful_bypasses.append(var_url)
                 state.bypassed.add(url)
+
 
 def check_if_fallback_from_response(
     url: str,
@@ -929,9 +1063,10 @@ async def validate_url(client: httpx.AsyncClient, url: str, state: State, verbos
             ep = state.endpoints.get(url)
             if not ep:
                 return
-
+            ep = dict(ep)
             ep["status"] = status
             ep["content_type"] = r.headers.get("content-type", "")
+
 
             fallback_status = "no"
             if status in (200, 403):
@@ -974,7 +1109,7 @@ async def validate_url(client: httpx.AsyncClient, url: str, state: State, verbos
             if verbose:
                 log_ep(f"{url} [{status}] ({cls})", status=status, cls=cls)
 
-            if status == 403:
+            if False and status == 403:
                 await try_bypasses(client, url, r, state)
 
             if status in (200, 401, 403):
@@ -989,8 +1124,11 @@ async def validate_url(client: httpx.AsyncClient, url: str, state: State, verbos
                     "inferred": ep.get("inferred", False),
                     "historical": ep.get("historical", False),
                     "fallback_status": fallback_status,
-                    "bypassed": url in state.bypassed
+                    "bypassed": url in state.bypassed,
+                    "content_type": ep.get("content_type", "")
                 }
+                t = detect_type(ep["url"], ep.get("content_type", ""))
+
 
                 if url.lower().endswith(".php"):
                     state.php_list.append(entry)
@@ -1015,7 +1153,8 @@ async def extract_from_json(data: Any, base: str, client: httpx.AsyncClient, sta
         for _, path, _ in ENDPOINT_REGEX.findall(data):
             ep = normalize(base, path)
             if ep and same_domain(ep, base, True):
-                await state.add_endpoint(ep, "json-extract")
+                if ep not in state.endpoints:
+                    await state.add_endpoint(ep, "json-extract")
 
 # =========================
 # MAIN
@@ -1051,18 +1190,30 @@ async def main(args):
         if not enum_only:
             log_progress("Starting Validation Phase...")
             await get_home_metrics(client, target, state)
+
             def chunked(lst, size):
                 for i in range(0, len(lst), size):
                     yield lst[i:i + size]
 
-            for chunk in chunked(list(state.endpoints.keys()), 200):
-                await asyncio.gather(*(validate_url(client, ep, state, verbose) for ep in chunk), return_exceptions=True)
+            MAX_VALIDATE = 3000
+            endpoints = list(state.endpoints.keys())[:MAX_VALIDATE]
+
+            tasks = []
+            for ep in endpoints:
+                tasks.append(validate_url(client, ep, state, verbose))
+                if len(tasks) >= MAX_CONCURRENCY:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    tasks = []
+
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     print("\n" + "=" * 60)
     if state.js_list:
         print(f"{Fore.CYAN}[+] JS encontrados ({len(state.js_list)}):{Style.RESET_ALL}")
         for js in sorted(set(state.js_list)):
             print(f"{Fore.YELLOW}[JS]{Style.RESET_ALL} {js}")
+
     if state.php_list:
         state.php_list = sorted(state.php_list, key=lambda x: (-x["priority"], x["url"]))
         print(f"\n{Fore.CYAN}[+] Endpoints PHP:{Style.RESET_ALL}")
@@ -1071,11 +1222,31 @@ async def main(args):
             class_color = CLASSIFY_COLORS.get(php["class"], Fore.WHITE)
             dynamic_str = " [DYNAMIC]" if php["is_dynamic"] else ""
             fallback_str = " {FALLBACK_ROUTE}" if php["fallback"] else ""
-            doubtful_str = " [DOUBTFUL]" if php["doubtful"] else ""
-            inferred_str = " [INFERRED]" if php["inferred"] else ""
             historical_str = " [HISTORICAL]" if php["historical"] else ""
             fallback_status_str = f" {{FALLBACK_{php['fallback_status'].upper()}}}" if php["fallback_status"] else ""
-            print(f"{Fore.MAGENTA}[PHP]{Style.RESET_ALL} {status_color}{php['url']} [{php['status']}] {class_color}({php['class']}){dynamic_str}{fallback_str}{doubtful_str}{inferred_str}{historical_str}{fallback_status_str}{Style.RESET_ALL}")
+            print(f"{Fore.MAGENTA}[PHP]{Style.RESET_ALL} {status_color}{php['url']} [{php['status']}] {class_color}({php['class']}){dynamic_str}{fallback_str}{historical_str}{fallback_status_str}{Style.RESET_ALL}")
+
+    collapsed = defaultdict(lambda: {"exts": set(), "entry": None})
+    final_ep_list = []
+
+    for ep in state.ep_list:
+        base, ext = split_backup_variant(ep["url"])
+        if not ext or ep["status"] == 200:
+            final_ep_list.append(ep)
+            continue
+        key = (base, ep["status"])
+        collapsed[key]["exts"].add(ext)
+        collapsed[key]["entry"] = ep
+
+    for (base, status), data in collapsed.items():
+        exts = sorted(data["exts"])
+        if len(exts) <= 4:
+            entry = data["entry"].copy()
+            entry["url"] = f"{base} ({', '.join(exts)})"
+            final_ep_list.append(entry)
+
+    state.ep_list = final_ep_list
+
     if state.ep_list:
         state.ep_list = sorted(state.ep_list, key=lambda x: (-x["priority"], x["url"]))
         print(f"\n{Fore.CYAN}[+] Endpoints interesantes:{Style.RESET_ALL}")
@@ -1085,38 +1256,60 @@ async def main(args):
             dynamic_str = " [DYNAMIC]" if ep["is_dynamic"] else ""
             fallback_str = " {FALLBACK_ROUTE}" if ep["fallback"] else ""
             bypass_str = " {BYPASSED}" if ep.get("bypassed") else ""
-            doubtful_str = " [DOUBTFUL]" if ep["doubtful"] else ""
-            inferred_str = " [INFERRED]" if ep["inferred"] else ""
             historical_str = " [HISTORICAL]" if ep["historical"] else ""
             fallback_status_str = f" {{FALLBACK_{ep['fallback_status'].upper()}}}" if ep["fallback_status"] else ""
-            print(f"{Fore.CYAN}[EP]{Style.RESET_ALL} {status_color}{ep['url']} [{ep['status']}] {class_color}({ep['class']}){dynamic_str}{fallback_str}{bypass_str}{doubtful_str}{inferred_str}{historical_str}{fallback_status_str}{Style.RESET_ALL}")
+            t = detect_type(ep["url"], ep.get("content_type", ""))
+            label, color = TYPE_STYLES[t]
+            print(
+                f"{color}[{label}]{Style.RESET_ALL} "
+                f"{status_color}{ep['url']} [{ep['status']}] "
+                f"{class_color}({t})"
+                f"{dynamic_str}{fallback_str}{bypass_str}{historical_str}{fallback_status_str}"
+                f"{Style.RESET_ALL}"
+            )
+
     if enum_only:
         print(f"\n{Fore.CYAN}[+] All Collected Endpoints/Routes (Unvalidated):{Style.RESET_ALL}")
         for url, data in sorted(state.endpoints.items(), key=lambda x: x[0]):
-            doubtful_str = " [DOUBTFUL]" if data["doubtful"] else ""
-            inferred_str = " [INFERRED]" if data["inferred"] else ""
             route_str = " [ROUTE]" if data["is_route"] else ""
             historical_str = " [HISTORICAL]" if data["historical"] else ""
             fallback_cand_str = " [FALLBACK_CANDIDATE]" if data["fallback_candidate"] else ""
             host_mismatch_str = " [HOST_MISMATCH]" if data["host_mismatch"] else ""
-            print(f"{Fore.LIGHTYELLOW_EX}{url}{doubtful_str}{inferred_str}{route_str}{historical_str}{fallback_cand_str}{host_mismatch_str}{Style.RESET_ALL}")
+            print(f"{Fore.LIGHTYELLOW_EX}{url}{route_str}{historical_str}{fallback_cand_str}{host_mismatch_str}{Style.RESET_ALL}")
+
     print(f"\n{Fore.CYAN}[+] Total requests: {state.requests}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[+] Total endpoints collected: {len(state.endpoints)}{Style.RESET_ALL}")
     if not enum_only:
         print(f"{Fore.CYAN}[+] Endpoints validados (200/401/403): {len(state.php_list) + len(state.ep_list)}{Style.RESET_ALL}")
+
     if state.successful_bypasses:
         print(f"\n{Fore.CYAN}[+] Successful 403 Bypasses:{Style.RESET_ALL}")
         for bypass in sorted(set(state.successful_bypasses)):
             print(Back.CYAN + Fore.BLACK + bypass + Style.RESET_ALL)
 
-    if args.save_js and state.js_list:
+    if getattr(state, "findings", None):
+        print(Fore.LIGHTBLACK_EX + "\n-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-_-" + Style.RESET_ALL)
+        print(Fore.LIGHTBLACK_EX + "' ' ' ' ' ' ' ' ' ' ' ' ' ' ' ' ' ' '" + Style.RESET_ALL)
+        for f in state.findings:
+            m = re.match(r"\[([A-Z_]+)\]\s+([^:]+)\s+:\s+(.*)", f)
+            if not m:
+                print(f)
+                continue
+            tag, url, value = m.groups()
+            tag_color = FINDING_COLORS.get(tag, Fore.WHITE)
+            print(
+                f"{tag_color}[{tag}] {url}{Style.RESET_ALL} : {value}"
+            )
+
+    if args.js and state.js_list:
         try:
-            with open(args.save_js, "w") as f:
+            with open(args.js, "w") as f:
                 for js in sorted(set(state.js_list)):
                     f.write(js + "\n")
-            log_info(f"JS URLs saved to {args.save_js}")
+            log_info(f"JS URLs saved to {args.js}")
         except Exception as e:
             log_err(f"Failed to save JS URLs: {e}")
+
 
 state = None
 def stop_signal(sig, frame):
@@ -1142,4 +1335,3 @@ if __name__ == "__main__":
     parser.add_argument("--js", type=str, help="Save collected JS URLs to a file")
     args = parser.parse_args()
     asyncio.run(main(args))
-
