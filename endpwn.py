@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =========================
-# ENDPWN V1.2.0
+# ENDPWN V1.2.1
 # =========================
 import argparse
 import asyncio
@@ -200,41 +200,62 @@ SOFT_404_REGEX = re.compile(
 
 KEYWORDS = {
     "ID": re.compile(
-        r'\b(id|userId|accountId|clientId|sessionId)\b\s*[:=]\s*["\']?([a-zA-Z0-9_-]{6,64})["\']?',
+        r'\b(?:user[_-]?id|account[_-]?id|client[_-]?id|session[_-]?id)\b\s*[:=]\s*["\']?([a-zA-Z0-9_-]{8,64})["\']?',
         re.I
     ),
     "TK": re.compile(
-        r'\b(token|apiKey|apikey|authToken|accessToken)\b\s*[:=]\s*["\']?([a-zA-Z0-9_\-\.]{20,200})["\']?',
+        r'\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|bearer|secret[_-]?key)\b\s*[:=]\s*["\']?([A-Za-z0-9\/+=._-]{32,200})["\']?',
         re.I
     ),
     "JWT": re.compile(
-        r'\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b'
+        r'\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\b'
+    ),
+    "JWT_INLINE": re.compile(
+        r'["\'](eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,})["\']'
     ),
     "PW": re.compile(
-        r'\b(password|passwd|pwd|secret)\b\s*[:=]\s*["\']([^"\']{6,100})["\']',
-        re.I
-    ),
-    "FUNC": re.compile(
-        r'\b(function\s+([a-zA-Z0-9_]{3,})\b|([a-zA-Z0-9_]{3,})\s*=\s*function\b|([a-zA-Z0-9_]{3,})\s*=\s*\([^)]*\)\s*=>)',
-        re.I
-    ),
-    "GH": re.compile(
-        r'\bhttps?:\/\/github\.com\/[a-zA-Z0-9_.-]{1,39}\/[a-zA-Z0-9_.-]{1,100}(?:\/[^\s"\'<>]*)?',
-        re.I
-    ),
-    "GH_RAW": re.compile(
-        r'\bhttps?:\/\/raw\.githubusercontent\.com\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+\/[^\s"\'<>]+',
+        r'\b(?:password|passwd|pwd)\b\s*[:=]\s*["\']([^"\'\\]{8,100})["\']',
         re.I
     ),
     "GH_TOKEN": re.compile(
-        r'\bgh[pousr]_[a-zA-Z0-9]{36,255}\b|\bgithub_pat_[a-zA-Z0-9_]{20,255}\b',
+        r'\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{20,255})\b',
+        re.I
+    ),
+    "GH_URL": re.compile(
+        r'https?:\/\/github\.com\/[A-Za-z0-9_.-]{1,39}\/[A-Za-z0-9_.-]{1,100}(?:\/[^\s"\'<>]*)?',
+        re.I
+    ),
+    "GH_RAW": re.compile(
+        r'https?:\/\/raw\.githubusercontent\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[^\s"\'<>]+',
         re.I
     ),
     "JS_MAP": re.compile(
-        r'\b[a-zA-Z0-9._-]{4,100}\.js\.map\b',
+        r'\b[A-Za-z0-9._-]+\.js\.map\b|"[A-Za-z0-9._-]+\.js\.map"',
         re.I
+    ),
+    "GENERIC_SECRET": re.compile(
+        r'["\']([A-Za-z0-9\/+=._-]{40,200})["\']'
+    ),
+    "AWS_KEY": re.compile(
+        r'\bAKIA[0-9A-Z]{16}\b'
+    ),
+    "AWS_SECRET": re.compile(
+        r'\b[A-Za-z0-9\/+=]{40}\b'
+    ),
+    "SLACK_TOKEN": re.compile(
+        r'\bxox[baprs]-[A-Za-z0-9-]{10,48}\b'
+    ),
+    "STRIPE_KEY": re.compile(
+        r'\bsk_live_[A-Za-z0-9]{20,}\b'
+    ),
+    "GCP_KEY": re.compile(
+        r'\bAIza[0-9A-Za-z\-_]{35}\b'
+    ),
+    "PRIVATE_KEY": re.compile(
+        r'-----BEGIN (?:RSA|DSA|EC|OPENSSH) PRIVATE KEY-----'
     )
 }
+
 
 
 TYPE_STYLES = {
@@ -248,16 +269,24 @@ TYPE_STYLES = {
 }
 
 FINDING_COLORS = {
-        "ID": Fore.CYAN,
-        "GH": Fore.MAGENTA,
-        "GH_RAW": Fore.LIGHTMAGENTA_EX,
-        "GH_TOKEN": Fore.RED,
-        "TK": Fore.YELLOW,
-        "JWT": Fore.RED,
-        "PW": Fore.LIGHTRED_EX,
-        "FUNC": Fore.GREEN,
-        "JS_MAP": Fore.LIGHTCYAN_EX,
+    "ID": Fore.CYAN,
+    "TK": Fore.YELLOW,
+    "JWT": Fore.RED,
+    "JWT_INLINE": Fore.RED,
+    "PW": Fore.LIGHTRED_EX,
+    "GH_TOKEN": Fore.RED,
+    "GH_URL": Fore.MAGENTA,
+    "GH_RAW": Fore.LIGHTMAGENTA_EX,
+    "JS_MAP": Fore.LIGHTCYAN_EX,
+    "GENERIC_SECRET": Fore.YELLOW,
+    "AWS_KEY": Fore.RED,
+    "AWS_SECRET": Fore.RED,
+    "SLACK_TOKEN": Fore.RED,
+    "STRIPE_KEY": Fore.RED,
+    "GCP_KEY": Fore.RED,
+    "PRIVATE_KEY": Fore.RED,
 }
+
 
 # =========================
 # =========================
@@ -265,12 +294,12 @@ def detect_type(url: str, content_type: str) -> str:
     u = url.lower()
     ct = (content_type or "").lower()
 
+    if u.endswith(".php"):
+        return "php"
     if u.endswith(".js") or "javascript" in ct:
         return "js"
     if u.endswith(".json") or "application/json" in ct:
         return "json"
-    if u.endswith(".php"):
-        return "php"
     if "text/html" in ct:
         return "html"
     if "xml" in ct:
@@ -278,6 +307,7 @@ def detect_type(url: str, content_type: str) -> str:
     if u.endswith(".txt"):
         return "txt"
     return "other"
+
 
 def split_backup_variant(url: str) -> tuple[str, str | None]:
     m = BACKUP_SUFFIX_REGEX.search(url)
@@ -533,93 +563,68 @@ def is_soft_404(r: httpx.Response) -> bool:
     return False
 
 
-
 def is_fallback_response(
     original_url: str,
     r: httpx.Response,
-    home_metrics: Tuple,
+    home_metrics: tuple,
     home_hash: str,
     home_length: int,
     home_content_type: str
 ) -> str:
     import hashlib
     from urllib.parse import urlparse
-    
+
     STATIC_EXTENSIONS = (
         ".js", ".css", ".map",
         ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
         ".woff", ".woff2", ".ttf", ".eot",
-        ".ico",
-        ".pdf",
+        ".ico", ".pdf",
         ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z",
         ".bak", ".backup", ".old", ".tmp", ".swp",
-        ".log",
-        ".env", ".ini", ".conf", ".config",
+        ".log", ".env", ".ini", ".conf", ".config",
         ".sql", ".db",
     )
 
     IMPOSSIBLE_PATH_MARKERS = (
-        "/node_modules/",
-        "/usr/",
-        "/etc/",
-        "/bin/",
-        "/sbin/",
-        "/lib/",
-        "/var/",
-        "/tmp/",
-        "/proc/",
-        "/sys/",
+        "/node_modules/", "/vendor/",
+        "/usr/", "/etc/", "/bin/", "/sbin/",
+        "/lib/", "/var/", "/tmp/", "/proc/", "/sys/",
     )
 
     SPA_MARKERS = (
-        "react-dom",
-        "angular",
-        "vue",
-        "svelte",
-        "next.js",
-        "nuxt",
-        "id=\"root\"",
-        "id=\"app\"",
-        "__next_data__",
-        "window.__nuxt__",
+        "react-dom", "angular", "vue", "svelte",
+        "next.js", "nuxt",
+        "id=\"root\"", "id=\"app\"",
+        "__next_data__", "window.__nuxt__",
     )
 
     NAVIGATION_MARKERS = (
-        "<nav",
-        "<header",
-        "<footer",
-        "<main",
-        "router",
-        "history.push",
+        "<a ", "href=",
+        "<form", "action=",
+        "window.location",
+        "location.href",
+        "history.push(",
+        "http-equiv=\"refresh\"",
+        "location.href=",
     )
 
-    def path_entropy(path: str) -> float:
-        if not path:
+    def path_entropy(p: str) -> float:
+        if not p:
             return 0.0
-        return len(set(path)) / max(len(path), 1)
+        return len(set(p)) / len(p)
 
-    content_type = r.headers.get("content-type", "").lower()
-    if not content_type:
-        return "no"
-
-    if any(x in content_type for x in (
-        "application/json",
-        "application/xml",
-        "image/",
-        "font/",
-        "video/",
-        "audio/",
-    )):
-        return "no"
-
+    content_type = (r.headers.get("content-type") or "").lower()
     if "text/html" not in content_type:
+        return "no"
+
+    if any(x in content_type for x in ("json", "xml", "image", "font", "audio", "video")):
         return "no"
 
     if is_soft_404(r):
         return "no"
 
-    parsed = urlparse(original_url)
-    path = parsed.path.lower()
+    parsed_orig = urlparse(original_url)
+    path = parsed_orig.path.lower()
 
     if path.endswith(STATIC_EXTENSIONS):
         return "no"
@@ -627,28 +632,22 @@ def is_fallback_response(
     if any(x in path for x in IMPOSSIBLE_PATH_MARKERS):
         return "no"
 
-    if len(path) > 60 and path_entropy(path) > 0.55:
+    if len(path) > 70 and path_entropy(path) > 0.6:
         return "no"
 
     body = r.text.lower()
     final_url = str(r.url)
+    parsed_final = urlparse(final_url)
+
     signals = 0.0
 
-    if not any(x in body for x in NAVIGATION_MARKERS):
+    if any(x in body for x in NAVIGATION_MARKERS):
+        signals += 1.0
+    else:
         return "no"
 
-    signals += 1.0 
-
-    parsed_final = urlparse(final_url)
-    if final_url != original_url and parsed_final.path in ("/", "/login", "/login/"):
+    if parsed_final.path in ("/", "/login", "/signin", "/auth") and parsed_final.path != path:
         signals += 1.0
-
-    try:
-        this_metrics = get_dom_metrics(r.text)
-        if home_metrics and metrics_similar(this_metrics, home_metrics):
-            signals += 1.0
-    except Exception:
-        pass
 
     try:
         this_hash = hashlib.md5(r.content).hexdigest()
@@ -659,27 +658,34 @@ def is_fallback_response(
 
     try:
         length_diff = abs(len(r.content) - home_length)
-        if home_length and length_diff < max(500, home_length * 0.05):
+        if home_length and length_diff < max(400, home_length * 0.04):
+            signals += 1.0
+    except Exception:
+        pass
+
+    try:
+        this_metrics = get_dom_metrics(r.text)
+        if home_metrics and metrics_similar(this_metrics, home_metrics):
             signals += 1.0
     except Exception:
         pass
 
     if any(x in body for x in SPA_MARKERS):
-        signals += 1.0
-        
-    server_hdr = r.headers.get("server", "").lower()
+        signals += 0.5
+
+    server_hdr = (r.headers.get("server") or "").lower()
     if any(x in server_hdr for x in ("cloudflare", "akamai", "fastly")):
         signals -= 0.5
 
-    if any(x in body for x in ("login", "signin", "sign in")):
+    if any(x in body for x in ("login", "sign in", "signin")):
         signals -= 0.5
-
 
     if signals >= 3.0:
         return "confirmed"
-    elif signals >= 1.5:
+    if signals >= 1.8:
         return "uncertain"
     return "no"
+
 
 
 
@@ -824,7 +830,33 @@ class HTMLCrawler:
             if path_segments > SEMANTIC_DEPTH_LIMIT:
                 continue
             self.visited.add(url)
-            log_info(f"HTML {url} ({len(self.visited)}/{MAX_HTML_PAGES})")
+
+            path = urlparse(url).path.lower()
+
+            if path.endswith(".php"):
+                label = "PHP"
+                color = Fore.MAGENTA
+            elif path.endswith(".js.map") or path.endswith(".map"):
+                label = "JS_MAP"
+                color = Fore.LIGHTCYAN_EX
+            elif path.endswith(".js"):
+                label = "JS"
+                color = Fore.YELLOW
+            elif path.endswith(".json"):
+                label = "JSON"
+                color = Fore.LIGHTYELLOW_EX
+            elif path.endswith(".xml"):
+                label = "XML"
+                color = Fore.LIGHTBLUE_EX
+            elif path.endswith(".txt"):
+                label = "TXT"
+                color = Fore.WHITE
+            else:
+                label = "HTML"
+                color = Fore.CYAN
+
+            print(f"{color}[+] {label} {url} ({len(self.visited)}/{MAX_HTML_PAGES}){Style.RESET_ALL}")
+
             try:
                 async with self.state.semaphore:
                     if not self.state.can_request():
@@ -980,7 +1012,36 @@ async def check_if_fallback(client: httpx.AsyncClient, url: str, state: State) -
             return 'no'
 
 
-async def try_bypasses(client: httpx.AsyncClient, url: str, original_response: httpx.Response, state: State):
+def response_fingerprint(r: httpx.Response):
+    return {
+        "status": r.status_code,
+        "len": len(r.content),
+        "hash": hashlib.md5(r.content).hexdigest(),
+        "type": r.headers.get("content-type", ""),
+        "location": r.headers.get("location", ""),
+    }
+
+
+def is_real_bypass(orig_fp, new_fp):
+    if new_fp["status"] != orig_fp["status"]:
+        return True
+    if new_fp["hash"] != orig_fp["hash"]:
+        return True
+    if new_fp["type"] != orig_fp["type"]:
+        return True
+    if new_fp["len"] > orig_fp["len"] * 1.3:
+        return True
+    if new_fp["location"]:
+        return True
+    return False
+
+
+async def try_bypasses(
+    client: httpx.AsyncClient,
+    url: str,
+    original_response: httpx.Response,
+    state,
+):
     parsed = urlparse(url)
     path = parsed.path
     if not path or path == "/":
@@ -988,19 +1049,139 @@ async def try_bypasses(client: httpx.AsyncClient, url: str, original_response: h
 
     rel = path.lstrip("/")
 
-    variants = [
+    orig_fp = response_fingerprint(original_response)
+
+    path_variants = set([
         path + "/.",
-        "//" + rel + "//",
+        path + "..;/",
         path.rstrip("/") + "/..",
+        path.rstrip("/") + "/..;/",
+        "//" + rel + "//",
+        "/;/" + rel,
+        "/;/"+ rel,
+        "/..;/" + rel,
         "/." + rel,
+        "/.." + rel,
         "/%2e/" + rel,
         "/%2e%2e/" + rel,
         "/%252e/" + rel,
-        "/" + rel + "%2f",
-        "/;%2f" + rel,
         "/.%2f" + rel,
+        "/" + rel + "%2f",
+        path + "%2e",
+        path + "%20",
+        path + "%09",
+        path + "%00",
+        "/" + rel.upper(),
         "/" + alternate_case(rel),
+        "/" + "".join(c.upper() if i % 2 else c.lower() for i, c in enumerate(rel)),
+    ])
+
+    header_variants = [
+        {"X-Original-URL": path},
+        {"X-Rewrite-URL": path},
+        {"X-Forwarded-For": "127.0.0.1"},
+        {"X-Client-IP": "127.0.0.1"},
+        {"X-Custom-IP-Authorization": "127.0.0.1"},
+        {"X-Forwarded-Host": "localhost"},
+        {"X-Host": "localhost"},
     ]
+
+    methods = ["GET", "POST", "HEAD", "OPTIONS"]
+
+    for p in path_variants:
+        var_url = parsed._replace(path=p, query="", fragment="").geturl()
+        if var_url in state.successful_bypasses:
+            continue
+
+        async with state.semaphore:
+            if not state.can_request():
+                return
+            state.register_request()
+            try:
+                r = await client.get(var_url, timeout=TIMEOUT)
+            except Exception:
+                continue
+
+        new_fp = response_fingerprint(r)
+        if is_real_bypass(orig_fp, new_fp):
+            state.successful_bypasses.add(var_url)
+            state.bypassed.add(url)
+            state.bypass_details.append({
+                "type": "PATH",
+                "payload": p,
+                "url": var_url,
+                "fingerprint": new_fp,
+            })
+
+    base_url = parsed._replace(path="/", query="", fragment="").geturl()
+
+    for headers in header_variants:
+        async with state.semaphore:
+            if not state.can_request():
+                return
+            state.register_request()
+            try:
+                r = await client.get(base_url, headers=headers, timeout=TIMEOUT)
+            except Exception:
+                continue
+
+        new_fp = response_fingerprint(r)
+        if is_real_bypass(orig_fp, new_fp):
+            state.successful_bypasses.add(str(headers))
+            state.bypassed.add(url)
+            state.bypass_details.append({
+                "type": "HEADER",
+                "payload": headers,
+                "url": base_url,
+                "fingerprint": new_fp,
+            })
+
+    for method in methods:
+        async with state.semaphore:
+            if not state.can_request():
+                return
+            state.register_request()
+            try:
+                r = await client.request(
+                    method,
+                    url,
+                    headers={"Content-Length": "0"},
+                    timeout=TIMEOUT,
+                )
+            except Exception:
+                continue
+
+        new_fp = response_fingerprint(r)
+        if is_real_bypass(orig_fp, new_fp):
+            state.successful_bypasses.add(method)
+            state.bypassed.add(url)
+            state.bypass_details.append({
+                "type": "METHOD",
+                "payload": method,
+                "url": url,
+                "fingerprint": new_fp,
+            })
+
+    crlf = "%0d%0aX-Rewrite-URL:%20" + path
+    crlf_url = parsed._replace(path="/" + crlf).geturl()
+
+    async with state.semaphore:
+        if state.can_request():
+            state.register_request()
+            try:
+                r = await client.get(crlf_url, timeout=TIMEOUT)
+                new_fp = response_fingerprint(r)
+                if is_real_bypass(orig_fp, new_fp):
+                    state.successful_bypasses.add("CRLF")
+                    state.bypassed.add(url)
+                    state.bypass_details.append({
+                        "type": "CRLF",
+                        "payload": crlf,
+                        "url": crlf_url,
+                        "fingerprint": new_fp,
+                    })
+            except Exception:
+                pass
 
     orig_len = len(original_response.content)
     orig_hash = hashlib.md5(original_response.content).hexdigest()
