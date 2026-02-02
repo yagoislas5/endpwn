@@ -233,15 +233,6 @@ KEYWORDS = {
         r'\b[A-Za-z0-9._-]+\.js\.map\b|"[A-Za-z0-9._-]+\.js\.map"',
         re.I
     ),
-    "GENERIC_SECRET": re.compile(
-        r'["\']([A-Za-z0-9\/+=._-]{40,200})["\']'
-    ),
-    "AWS_KEY": re.compile(
-        r'\bAKIA[0-9A-Z]{16}\b'
-    ),
-    "AWS_SECRET": re.compile(
-        r'\b[A-Za-z0-9\/+=]{40}\b'
-    ),
     "SLACK_TOKEN": re.compile(
         r'\bxox[baprs]-[A-Za-z0-9-]{10,48}\b'
     ),
