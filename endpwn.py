@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =========================
-# ENDPWN V1.2.1
+# ENDPWN V1.2.2
 # =========================
 import argparse
 import asyncio
